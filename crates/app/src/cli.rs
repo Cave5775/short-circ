@@ -26,6 +26,8 @@ pub enum Command {
     RenderPart { ty: String, out: PathBuf, dark: bool, circuit_dir: Option<PathBuf>, view: View },
     ImportFritzing { input: PathBuf, out: PathBuf, views: Vec<View>, ty: Option<String> },
     Upgrade { input: PathBuf, output: Option<PathBuf> },
+    /// Everything after `--autoroute`, parsed by `short_circ_core::route::cli`.
+    Autoroute(Vec<String>),
     ListParts,
     ListColors,
     Help,
@@ -55,6 +57,13 @@ USAGE:
                                               dipN/headerN work; default view: schematic)
   short-circ --upgrade IN [OUT]               rewrite a .circ or .part (format v1 or v2) as canonical
                                               v2, in place when OUT is omitted (exit 0 ok, 2 error)
+  short-circ --autoroute IN OUT [--to schematic|breadboard] [--from-nets] [--scope all|unrouted]
+            [--only R1.a,B1.pos] [--no-place] [--replace] [--crossings] [--prefer bends|length]
+            [--clearance N] [--no-labels] [--jumper straight|orthogonal|diagonal]
+            [--jumper-color by-net|COLOUR] [--max-jumper N]
+                                              realise the nets of one view as placement and wires in
+                                              the other (default target: breadboard); exit 0 all nets
+                                              done, 1 some failed (OUT still written), 2 error
   short-circ --import-fritzing IN OUT [--views schematic,breadboard] [--type NAME]
                                               import a Fritzing part: IN is a .fzpz, a .fzp or a folder
                                               of them, OUT a .part file or (for folders) a folder;
@@ -106,6 +115,10 @@ fn parse_views(v: &str) -> Result<Vec<View>, String> {
 
 /// Parse arguments (without the program name).
 pub fn parse(args: &[String]) -> Result<Command, String> {
+    // The autoroute options have their own parser in core; hand over everything after the flag.
+    if let Some(i) = args.iter().position(|a| a == "--autoroute") {
+        return Ok(Command::Autoroute(args[i + 1..].to_vec()));
+    }
     let mut mode: Option<&str> = None;
     let mut positional: Vec<PathBuf> = Vec::new();
     let (mut json, mut dark) = (false, false);
@@ -363,6 +376,7 @@ pub fn run(cmd: Command) -> i32 {
             crate::partview::run(&ty, &out, dark, circuit_dir.as_deref(), view)
         }
         Command::Upgrade { input, output } => upgrade(&input, output.as_deref()),
+        Command::Autoroute(rest) => short_circ_core::route::cli::run(&rest),
         Command::ImportSvg { input, out, ty, pins, scale } => {
             import_svg_file(&input, &out, &ty, &pins, scale)
         }
@@ -760,6 +774,15 @@ mod tests {
         assert!(p(&["--render-part", "a", "b", "--view", "all"]).is_err());
         assert!(p(&["--render", "a.circ", "o.svg", "--circuit-dir", "d"]).is_err());
         assert!(p(&["--circuit-dir", "d", "a.circ"]).is_err());
+    }
+
+    #[test]
+    fn autoroute_hands_the_rest_to_core() {
+        assert_eq!(
+            p(&["--autoroute", "a.circ", "b.circ", "--to", "schematic", "--crossings"]).unwrap(),
+            Command::Autoroute(vec!["a.circ".into(), "b.circ".into(), "--to".into(), "schematic".into(), "--crossings".into()])
+        );
+        assert!(HELP.contains("--autoroute"));
     }
 
     #[test]
