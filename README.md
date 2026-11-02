@@ -8,11 +8,13 @@ Phase 1 is the viewer and checker. A builder/editor is planned for later (see [R
 
 ## Features
 
-- **Viewer**: pan, zoom, fit to window, hover pins and wires to see their names and nets, click a part for its details.
+- **Viewer**: pan, zoom, fit to window, hover pins and wires to see their names and nets, click a part for its details, live reload when the file changes.
+- **Net highlighting**: click a pin or wire to lock its net highlight, or pick a net in the nets panel.
 - **Validator**: finds overlapping wires, crossings without a junction, dangling wires, unconnected pins, overlapping parts, bad colours and more.
 - **SVG export**: from the File menu, or with `--render` on the command line.
-- **Command line**: `--validate` with exit codes for scripts and CI, plus `--render`, `--list-parts`, `--list-colors` and `--import-svg`.
-- **Built-in parts**: 23 component types, plus generated DIP packages (`dipN`) and pin headers (`headerN`).
+- **Command line**: `--validate` with exit codes for scripts and CI, plus `--render`, `--netlist`, `--render-part`, `--list-parts`, `--list-colors`, `--import-svg` and `--import-fritzing`.
+- **Built-in parts**: 23 component types, plus generated DIP packages (`dipN`) and pin headers (`headerN`), and a part browser to inspect them.
+- **Fritzing import**: convert Fritzing `.fzpz` and `.fzp` parts into short-circ parts. See [Fritzing component import](#fritzing-component-import).
 - **Colours**: hex codes, preset names and circuit-wide theme defaults. See [Colours](#colours).
 
 ## Quick start
@@ -61,13 +63,19 @@ cargo test --workspace
 - Drag with the left or middle mouse button to pan.
 - Use the mouse wheel to zoom.
 - Press F, or use View > Fit to window, to fit the whole circuit in the window.
-- The View menu toggles the grid, the dark theme (on by default) and the issues panel.
+- The View menu toggles the grid, the dark theme (on by default), the issues panel, the nets panel and the part browser.
+- View > Labels shows or hides part references, part values, wire ids and pin names. Text that would be smaller than 7 pixels is hidden automatically.
+- Shortcuts: Ctrl+O open, F fit, R reload now, G toggle the grid, Esc clear the selection. Help > Shortcuts lists them.
 
 **Hovering and clicking**
 
 - Hover a pin to see its name and net. The wires and pins of that net are highlighted.
 - Hover a wire to see its id and net, with the same highlighting.
-- Click a part to show its details on the right: type, position, rotation, properties and pins with their nets. Click empty space to hide them.
+- Click a part to show its details on the right: type, position, rotation, properties, colours and pins with their nets.
+- Click a pin or wire to lock the highlight on its net. Click empty space or press Esc to clear the selection and the lock.
+- View > Nets lists every net with its name and pins. Click one to highlight it and zoom to fit it.
+- The viewer reloads the circuit automatically when the file, or the `parts/` folder beside it, changes (View > Auto-reload, on by default). If the new file is broken, the old circuit stays on screen and an error banner appears.
+- View > Part browser lists every part type that can be resolved, with a preview that labels each pin. It is useful for checking an imported component.
 - The issues panel at the bottom lists the problems the validator found. Click an issue to move the view to it.
 - File > Export SVG... saves the current circuit as an SVG image.
 
@@ -132,6 +140,9 @@ The same `short-circ.exe` runs headless when you pass one of these options.
 | `short-circ.exe --validate FILE.circ [--json]` | Check a circuit and print the report. `--json` prints the report as JSON. |
 | `short-circ.exe --render FILE.circ OUT.svg [--dark]` | Export an SVG image. `--dark` renders with the dark theme. |
 | `short-circ.exe --import-svg IN.svg OUT.part --type NAME [--pins SPEC] [--scale PX]` | Turn SVG artwork into a `.part` file. `SPEC` is `id:x,y` entries separated by `;` (grid units). `PX` is pixels per grid unit (default 10). |
+| `short-circ.exe --import-fritzing IN OUT [--view schematic\|breadboard] [--type NAME]` | Convert a Fritzing part. `IN` is a `.fzpz`, a `.fzp`, or a folder of them. `OUT` is a `.part` file, or a folder when `IN` is a folder. |
+| `short-circ.exe --netlist FILE.circ [--json]` | Print every net with its name, pins (such as `R1.a`) and wire ids. |
+| `short-circ.exe --render-part TYPE OUT.svg [--dark] [--circuit-dir DIR]` | Draw one part with its pin ids labelled and its bounding box. `TYPE` resolves like it would in a circuit, including `dipN` and `headerN`. |
 | `short-circ.exe --list-parts` | List the component types that can be resolved. |
 | `short-circ.exe --list-colors` | List the preset colour names with their hex codes. |
 | `short-circ.exe --help` (or `-h`) | Show usage. |
@@ -142,7 +153,7 @@ Exit codes:
 | Code | Meaning |
 |---|---|
 | 0 | Success. For `--validate`, no errors were found (warnings are allowed). |
-| 1 | `--validate` found errors, or an SVG or part file could not be written or imported. |
+| 1 | `--validate` found errors, an SVG or part file could not be written or imported, or `--render-part` was given an unknown type. |
 | 2 | An input file could not be read or parsed, or the arguments were invalid. |
 
 The `.exe` is a Windows GUI program, so PowerShell may not show its output directly. Pipe it to get the text, for example:
@@ -164,15 +175,17 @@ You can also create a part from SVG artwork with `--import-svg`, described in th
 
 ## Fritzing component import
 
-This section describes a feature that is being merged into `main` alongside the rest of the viewer work.
+Fritzing parts can be used directly. The importer reads the part's graphics and its connector positions, and snaps the pins to the 0.1 inch grid.
 
-- `--import-fritzing` converts a Fritzing part (`.fzpz` or `.fzp`) into a short-circ `.part` file.
-- File > Import Fritzing part does the same from the viewer.
-- A `.fzpz` file dropped into a `parts/` folder is picked up automatically.
+- `short-circ.exe --import-fritzing part.fzpz parts\part.part` converts one part. Pass a folder as `IN` and a folder as `OUT` to convert every `.fzpz` and `.fzp` directly inside it.
+- The schematic view is used by default. `--view breadboard` uses the breadboard artwork instead.
+- File > Import Fritzing part... does the same from the viewer, and writes the result into the `parts/` folder next to the open circuit.
+- A `.fzpz` file, or a `.fzp` with its SVG files, placed in a `parts/` folder is picked up automatically without converting it first.
+- Warnings, for example a connector with no schematic view or a duplicate pin name, are printed to stderr during conversion. Check the result with `--render-part TYPE out.svg` or the part browser.
+
+Not handled: the PCB view, breadboard legs, raster images, gradients, filters and text fonts. Fritzing's core parts are licensed CC-BY-SA, so credit them if you redistribute converted parts.
 
 ## Colours
-
-This section describes colour support, which is already on `main`.
 
 A colour is a hex code (`#rgb`, `#rrggbb` or `#rrggbbaa`) or one of the 18 preset names:
 
@@ -184,18 +197,7 @@ Run `short-circ.exe --list-colors` to see the hex code for each name. Colours ca
 - parts (`color` for the outline, `fill`, and `label_color` for text),
 - the whole circuit, with the `theme` object, which sets defaults for the background, grid, wires, parts, labels, pins and junctions.
 
-The special value `none` draws nothing. `default` uses the default for that kind of object. The object's own colour wins over the part's colour, which wins over the circuit theme, which wins over the built-in light or dark default. Explicit colours are never inverted for dark mode. See [`examples/colors.circ`](examples/colors.circ) for an example.
-
-## Viewer extras
-
-This section describes viewer features that are being merged into `main` alongside the rest of the viewer work.
-
-- **Live reload**: the viewer reloads the circuit when its file changes on disk.
-- **Net highlighting**: click a wire or pin to highlight its whole net, and use the nets panel to list the nets in the circuit.
-- **Part browser**: browse the available component types inside the viewer.
-- **Label toggles**: show or hide part and label text.
-- **Netlist**: `short-circ.exe --netlist [--json]` prints the circuit's nets, as JSON with `--json`.
-- **Part preview**: `short-circ.exe --render-part TYPE OUT.svg` renders one component type to SVG.
+The special value `none` draws nothing. `default` uses the default for that kind of object. A shape's own stroke or fill wins over the part's colour, which wins over the circuit theme, which wins over the built-in light or dark default. Explicit colours are never inverted for dark mode. See [`examples/colors.circ`](examples/colors.circ) for an example.
 
 ## Project layout
 
