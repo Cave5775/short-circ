@@ -1,10 +1,26 @@
 //! Autoroute and port: realise the nets of one view as placement and wires in the other.
-//! Contract for docs/FORMAT.md "Autoroute and port". Pure: takes a circuit, returns a new one,
+//! Contract: docs/FORMAT.md "Autoroute and port". Pure: takes a circuit, returns a new one,
 //! so the GUI can preview, commit as one undo step, or discard.
 //!
-//! Owned by the router stream; this file holds only the shared types until then.
+//! Layout of this module:
+//! - `nets`: the nets to realise (other view or declared) restricted to pins that can exist in
+//!   the target view,
+//! - `sch`: schematic target (grid placement of missing parts, orthogonal A* routing with
+//!   crossings and label fallback),
+//! - `bb`: breadboard target (placement of parts onto board holes without shorts, jumpers),
+//! - `cli`: the `--autoroute` command line front end.
 
-use crate::model::{Circuit, PartLookup, View};
+pub mod bb;
+pub mod cli;
+pub mod nets;
+pub mod sch;
+
+#[cfg(test)]
+mod tests;
+
+use crate::model::{Circuit, PartLookup, Placement, Pt, View, ViewDef};
+use crate::transform::world_bbox;
+use std::collections::{HashMap, HashSet};
 
 /// Where the nets to realise come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -119,15 +135,104 @@ pub struct RouteOutcome {
     pub failures: Vec<RouteFailure>,
 }
 
+/// Running totals shared by the two targets.
+#[derive(Debug, Default)]
+pub(crate) struct Acc {
+    pub placed: Vec<String>,
+    pub wires_added: Vec<String>,
+    pub routed: usize,
+    pub failures: Vec<RouteFailure>,
+}
+
 /// Port the circuit into `opts.to`. Never fails as a whole: unroutable nets are reported in
 /// `failures` and the rest is still produced.
 pub fn port(circuit: &Circuit, lib: &dyn PartLookup, opts: &RouteOptions) -> RouteOutcome {
-    let _ = (lib, opts);
-    RouteOutcome {
-        circuit: circuit.clone(),
-        placed: Vec::new(),
-        wires_added: Vec::new(),
-        routed: 0,
-        failures: vec![RouteFailure { net: String::new(), reason: "autoroute is not implemented yet".into() }],
+    let mut c = circuit.clone();
+    let mut acc = Acc::default();
+    if !opts.keep_wires {
+        if opts.to == View::Schematic && !c.labels.is_empty() {
+            // Labels that sat on a removed wire would be debris; labels on pins stay.
+            let before = crate::netlist::Netlist::build(&c, lib, View::Schematic);
+            c.wires.retain(|w| w.view != opts.to);
+            let after = crate::netlist::Netlist::build(&c, lib, View::Schematic);
+            let keep: Vec<bool> =
+                c.labels.iter().map(|l| before.net_at(l.at).is_none() || after.net_at(l.at).is_some()).collect();
+            let mut k = keep.into_iter();
+            c.labels.retain(|_| k.next().unwrap_or(true));
+        } else {
+            c.wires.retain(|w| w.view != opts.to);
+        }
     }
+    let nets = nets::source_nets(&c, lib, opts, &mut acc.failures);
+    match opts.to {
+        View::Schematic => sch::run(&mut c, lib, opts, nets, &mut acc),
+        View::Breadboard => bb::run(&mut c, lib, opts, nets, &mut acc),
+    }
+    RouteOutcome { circuit: c, placed: acc.placed, wires_added: acc.wires_added, routed: acc.routed, failures: acc.failures }
+}
+
+// ---- shared helpers ----------------------------------------------------------------------
+
+/// Integer rectangle on the lattice (closed on all sides for point tests).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Rect {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+impl Rect {
+    pub fn inflate(self, d: i32) -> Rect {
+        Rect { x0: self.x0 - d, y0: self.y0 - d, x1: self.x1 + d, y1: self.y1 + d }
+    }
+
+    /// Overlap with positive area.
+    pub fn overlaps(&self, o: &Rect) -> bool {
+        self.x0 < o.x1 && o.x0 < self.x1 && self.y0 < o.y1 && o.y0 < self.y1
+    }
+
+    pub fn contains(&self, p: Pt) -> bool {
+        p[0] >= self.x0 && p[0] <= self.x1 && p[1] >= self.y0 && p[1] <= self.y1
+    }
+}
+
+/// World bounding box of a placed view rounded outwards to the lattice.
+pub(crate) fn part_rect(pl: &Placement, vd: &ViewDef) -> Rect {
+    let (mn, mx) = world_bbox(pl, vd);
+    Rect { x0: mn[0].floor() as i32, y0: mn[1].floor() as i32, x1: mx[0].ceil() as i32, y1: mx[1].ceil() as i32 }
+}
+
+/// Same sequence as `edit::fresh_id` (smallest unused `prefix + n` among part and wire ids) but
+/// without rescanning the circuit for every id.
+pub(crate) struct IdGen {
+    used: HashSet<String>,
+    next: HashMap<String, u32>,
+}
+
+impl IdGen {
+    pub fn new(c: &Circuit) -> IdGen {
+        let used = c.parts.iter().map(|p| p.id.clone()).chain(c.wires.iter().map(|w| w.id.clone())).collect();
+        IdGen { used, next: HashMap::new() }
+    }
+
+    pub fn fresh(&mut self, prefix: &str) -> String {
+        let n = self.next.entry(prefix.to_string()).or_insert(1);
+        loop {
+            let id = format!("{prefix}{n}");
+            *n += 1;
+            if self.used.insert(id.clone()) {
+                return id;
+            }
+        }
+    }
+}
+
+/// Part indexes by id (first occurrence wins).
+pub(crate) fn part_index(c: &Circuit) -> HashMap<String, usize> {
+    let mut m = HashMap::new();
+    for (i, p) in c.parts.iter().enumerate() {
+        m.entry(p.id.clone()).or_insert(i);
+    }
+    m
 }
