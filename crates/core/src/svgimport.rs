@@ -1,12 +1,17 @@
-//! Tiny dependency-free SVG subset reader that turns artwork into a [`PartDef`].
+//! SVG subset reader (on `roxmltree`) that turns artwork into a [`PartDef`].
 //!
 //! Supported elements: `line`, `rect` (with `rx`/`ry`), `circle`, `ellipse` (a circle when
 //! `rx == ry` and the transform is a uniform scale, otherwise a 32-gon), `polyline`,
 //! `polygon`, `path` (commands `M L H V C S Q T A Z`, absolute and relative; curves are
-//! flattened to polylines), `text`, and `g`/`svg`/`a` containers. `transform` attributes
-//! (`translate`, `scale`, `rotate`, `matrix`, `skewX`, `skewY`) compose down the tree.
-//! `defs`, `clipPath`, `mask`, `symbol`, `style`, `title`, ... and `display:none` subtrees
-//! are skipped. Root `width`/`height`/`viewBox` are ignored: user units are taken as pixels.
+//! flattened to polylines), `text`, `use` (references to any element by id), and
+//! `g`/`svg`/`a` containers. `transform` attributes (`translate`, `scale`, `rotate`, `matrix`,
+//! `skewX`, `skewY`) compose down the tree. Styling comes from presentation attributes, `<style>`
+//! rules (type, `.class`, `#id` selectors, comma lists, last compound of descendant selectors)
+//! and `style=""`, in that order of precedence, inherited down groups. `defs`, `clipPath`,
+//! `mask`, `symbol`, `style`, `title`, ... and `display:none` subtrees are not drawn.
+//! [`import_svg`] ignores root `width`/`height`/`viewBox` (user units are pixels); [`read_scene`]
+//! in physical mode honours them (units in/mm/cm/pt/pc/px) and also reports the bounding box of
+//! every element with an `id`, which the Fritzing importer uses to place pins.
 //!
 //! Styling (decisions for schematic use, not full SVG semantics): a missing `fill` means no
 //! fill (SVG would say black); a missing or black `stroke` means "theme foreground" (the
@@ -20,6 +25,7 @@
 //! `dir` is inferred from the nearest bbox edge.
 
 use crate::model::{Anchor, Dir, PartDef, PinDef, Shape, Style, FORMAT};
+use std::collections::BTreeMap;
 
 pub const DEFAULT_PX_PER_UNIT: f64 = 10.0;
 
@@ -41,7 +47,7 @@ pub fn import_svg_scaled(
     if ty.trim().is_empty() {
         return Err("part type name must not be empty".into());
     }
-    let raw = read_shapes(svg)?;
+    let raw = read_scene(svg, false)?.shapes;
     if raw.is_empty() {
         return Err("no drawable shapes found in SVG".into());
     }
@@ -86,6 +92,7 @@ pub fn import_svg_scaled(
         shapes,
         params: None,
         svg: None,
+        meta: None,
     })
 }
 
@@ -115,7 +122,8 @@ fn r3(v: f64) -> f64 {
     }
 }
 
-fn infer_dir(at: [i32; 2], w: f64, h: f64) -> Dir {
+/// Direction a pin at `at` leads out of a `w` x `h` box: toward the nearest edge.
+pub fn infer_dir(at: [i32; 2], w: f64, h: f64) -> Dir {
     let (x, y) = (at[0] as f64, at[1] as f64);
     let cands = [(x, Dir::Left), (w - x, Dir::Right), (y, Dir::Up), (h - y, Dir::Down)];
     let mut best = cands[0];
@@ -538,155 +546,10 @@ fn arc_points(p1: [f64; 2], rx: f64, ry: f64, phi_deg: f64, fa: bool, fs: bool, 
     }
     out
 }
-
 // ---------------------------------------------------------------------------------------
-// Minimal XML tokenizer
+// XML (roxmltree), CSS and units
 
-enum Tag {
-    Open { name: String, attrs: Vec<(String, String)>, self_closing: bool },
-    Close,
-}
-
-fn decode_entities(s: &str) -> String {
-    if !s.contains('&') {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
-        let tail = &rest[i..];
-        match tail.find(';') {
-            Some(j) if j <= 10 => {
-                let ent = &tail[1..j];
-                let rep = match ent {
-                    "amp" => Some('&'),
-                    "lt" => Some('<'),
-                    "gt" => Some('>'),
-                    "quot" => Some('"'),
-                    "apos" => Some('\''),
-                    _ => ent
-                        .strip_prefix("#x")
-                        .and_then(|h| u32::from_str_radix(h, 16).ok())
-                        .or_else(|| ent.strip_prefix('#').and_then(|d| d.parse().ok()))
-                        .and_then(char::from_u32),
-                };
-                match rep {
-                    Some(c) => {
-                        out.push(c);
-                        rest = &tail[j + 1..];
-                    }
-                    None => {
-                        out.push('&');
-                        rest = &tail[1..];
-                    }
-                }
-            }
-            _ => {
-                out.push('&');
-                rest = &tail[1..];
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-fn next_tag(src: &str, mut pos: usize) -> Option<(Tag, usize)> {
-    let b = src.as_bytes();
-    loop {
-        let lt = pos + src[pos..].find('<')?;
-        let rest = &src[lt..];
-        let skip_to = |end: &str| -> usize {
-            rest.find(end).map_or(src.len(), |e| lt + e + end.len())
-        };
-        if rest.starts_with("<!--") {
-            pos = skip_to("-->");
-            continue;
-        }
-        if rest.starts_with("<![CDATA[") {
-            pos = skip_to("]]>");
-            continue;
-        }
-        if rest.starts_with("<?") {
-            pos = skip_to("?>");
-            continue;
-        }
-        if rest.starts_with("<!") {
-            pos = skip_to(">");
-            continue;
-        }
-        if rest.starts_with("</") {
-            return Some((Tag::Close, skip_to(">")));
-        }
-        // Open tag.
-        let mut i = lt + 1;
-        let ns = i;
-        while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'/' && b[i] != b'>' {
-            i += 1;
-        }
-        let full = &src[ns..i];
-        let name = full.rsplit(':').next().unwrap_or(full).to_string();
-        let mut attrs = Vec::new();
-        let mut self_closing = false;
-        loop {
-            while i < b.len() && b[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            if i >= b.len() {
-                return None;
-            }
-            if b[i] == b'>' {
-                i += 1;
-                break;
-            }
-            if b[i] == b'/' {
-                self_closing = true;
-                i += 1;
-                continue;
-            }
-            let ks = i;
-            while i < b.len() && !b[i].is_ascii_whitespace() && !matches!(b[i], b'=' | b'>' | b'/') {
-                i += 1;
-            }
-            let key = src[ks..i].to_string();
-            while i < b.len() && b[i].is_ascii_whitespace() {
-                i += 1;
-            }
-            let mut val = String::new();
-            if i < b.len() && b[i] == b'=' {
-                i += 1;
-                while i < b.len() && b[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-                if i < b.len() && (b[i] == b'"' || b[i] == b'\'') {
-                    let q = b[i];
-                    i += 1;
-                    let vs = i;
-                    while i < b.len() && b[i] != q {
-                        i += 1;
-                    }
-                    val = decode_entities(&src[vs..i.min(b.len())]);
-                    i = (i + 1).min(b.len());
-                } else {
-                    let vs = i;
-                    while i < b.len() && !b[i].is_ascii_whitespace() && b[i] != b'>' {
-                        i += 1;
-                    }
-                    val = src[vs..i].to_string();
-                }
-            }
-            if key.is_empty() {
-                // Defensive: avoid an infinite loop on stray characters.
-                i += 1;
-                continue;
-            }
-            let key = key.rsplit(':').next().unwrap_or(&key).to_string();
-            attrs.push((key, val));
-        }
-        return Some((Tag::Open { name, attrs, self_closing }, i));
-    }
-}
+type Props = Vec<(String, String)>;
 
 fn get<'a>(props: &'a [(String, String)], k: &str) -> Option<&'a str> {
     props.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.as_str())
@@ -694,6 +557,341 @@ fn get<'a>(props: &'a [(String, String)], k: &str) -> Option<&'a str> {
 
 fn fnum(props: &[(String, String)], k: &str) -> f64 {
     get(props, k).and_then(length).unwrap_or(0.0)
+}
+
+/// Bounding box `[minx, miny, maxx, maxy]`.
+pub type Bb = [f64; 4];
+
+fn bb_union(a: Option<Bb>, b: Option<Bb>) -> Option<Bb> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some([a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+fn shape_bb(s: &Shape) -> Option<Bb> {
+    let mut b = BBox::new();
+    b.add_shape(s, false);
+    if b.is_empty() {
+        None
+    } else {
+        Some([b.min[0], b.min[1], b.max[0], b.max[1]])
+    }
+}
+
+/// Bounding box of the geometry of `shapes` (text excluded).
+pub fn shapes_bbox(shapes: &[Shape]) -> Option<Bb> {
+    shapes.iter().fold(None, |acc, s| bb_union(acc, shape_bb(s)))
+}
+
+/// Move a shape by `(dx, dy)`.
+pub fn translate_shape(s: Shape, dx: f64, dy: f64) -> Shape {
+    map_shape(s, &|p| [r3(p[0] + dx), r3(p[1] + dy)], 1.0)
+}
+
+/// A selector reduced to its last compound: optional tag, optional id, classes.
+struct Sel {
+    tag: Option<String>,
+    id: Option<String>,
+    classes: Vec<String>,
+}
+
+struct CssRule {
+    sel: Sel,
+    spec: (usize, usize, usize),
+    order: usize,
+    decls: Props,
+}
+
+impl Sel {
+    fn matches(&self, name: &str, id: Option<&str>, classes: &[&str]) -> bool {
+        self.tag.as_deref().is_none_or(|t| t == name)
+            && self.id.as_deref().is_none_or(|i| Some(i) == id)
+            && self.classes.iter().all(|c| classes.contains(&c.as_str()))
+    }
+}
+
+fn parse_compound(s: &str) -> Option<Sel> {
+    if s.contains(':') || s.contains('[') || s.contains('*') && s.len() > 1 {
+        return None;
+    }
+    let mut sel = Sel { tag: None, id: None, classes: Vec::new() };
+    let mut cur = String::new();
+    let mut kind = 't';
+    let flush = |kind: char, cur: &mut String, sel: &mut Sel| {
+        if !cur.is_empty() {
+            match kind {
+                't' if cur != "*" => sel.tag = Some(cur.clone()),
+                '#' => sel.id = Some(cur.clone()),
+                '.' => sel.classes.push(cur.clone()),
+                _ => {}
+            }
+            cur.clear();
+        }
+    };
+    for ch in s.chars() {
+        if ch == '.' || ch == '#' {
+            flush(kind, &mut cur, &mut sel);
+            kind = ch;
+        } else {
+            cur.push(ch);
+        }
+    }
+    flush(kind, &mut cur, &mut sel);
+    Some(sel)
+}
+
+fn parse_decls(body: &str) -> Props {
+    let mut out = Vec::new();
+    for d in body.split(';') {
+        if let Some((k, v)) = d.split_once(':') {
+            let v = v.replace("!important", "");
+            out.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+        }
+    }
+    out
+}
+
+/// Read `selector { decl; ... }` rules (class, id and type selectors, comma lists; the last
+/// compound of a descendant selector is used; pseudo classes and attribute selectors are
+/// ignored). `@media` and similar blocks are read as if they always applied.
+fn parse_css(css: &str, rules: &mut Vec<CssRule>) {
+    let mut s = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(i) = rest.find("/*") {
+        s.push_str(&rest[..i]);
+        rest = rest[i + 2..].find("*/").map_or("", |j| &rest[i + 2 + j + 2..]);
+    }
+    s.push_str(rest);
+    let mut rest = s.as_str();
+    while let Some(open) = rest.find('{') {
+        let head = rest[..open].trim();
+        let mut depth = 1;
+        let mut j = open + 1;
+        let b = rest.as_bytes();
+        while j < b.len() && depth > 0 {
+            match b[j] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            j += 1;
+        }
+        let body = &rest[open + 1..j.saturating_sub(1).max(open + 1)];
+        rest = &rest[j.min(rest.len())..];
+        if head.starts_with('@') {
+            parse_css(body, rules);
+            continue;
+        }
+        let decls = parse_decls(body);
+        for part in head.split(',') {
+            let last = part.split(|c: char| c.is_whitespace() || c == '>' || c == '+' || c == '~').rfind(|t| !t.is_empty());
+            let Some(sel) = last.and_then(parse_compound) else { continue };
+            let spec = (sel.id.iter().count(), sel.classes.len(), sel.tag.iter().count());
+            rules.push(CssRule { sel, spec, order: rules.len(), decls: decls.clone() });
+        }
+    }
+}
+
+/// Add `xmlns:prefix` declarations for undeclared prefixes (some exports omit `xlink`).
+fn fix_namespaces(svg: &str) -> String {
+    let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    let mut src = svg.trim_start_matches('\u{feff}').to_string();
+    let mut added: Vec<String> = Vec::new();
+    for _ in 0..8 {
+        let err = roxmltree::Document::parse_with_options(&src, opts).err();
+        let Some(roxmltree::Error::UnknownNamespace(prefix, _)) = err else { break };
+        if added.contains(&prefix) {
+            break;
+        }
+        let Some(i) = src.find("<svg") else { break };
+        src.insert_str(i + 4, &format!(" xmlns:{prefix}=\"urn:short-circ:{prefix}\""));
+        added.push(prefix);
+    }
+    src
+}
+
+/// Result of [`read_scene`].
+#[derive(Debug, Clone, Default)]
+pub struct Scene {
+    /// Drawn shapes: pixels in raw mode, grid units (0.1 in) in physical mode.
+    pub shapes: Vec<Shape>,
+    /// Bounding box (same units) of every element with an `id`, groups included.
+    pub ids: BTreeMap<String, Bb>,
+    /// Declared root size in inches, when `width` and `height` are both absolute lengths.
+    pub declared_in: Option<[f64; 2]>,
+    /// Dots per inch assumed for unit-less lengths (physical mode).
+    pub dpi: f64,
+    pub warnings: Vec<String>,
+}
+
+/// Parse an SVG document. In raw mode root `width`/`height`/`viewBox` are ignored and user
+/// units are returned as they are. In physical mode the root size is honoured (units `in`,
+/// `mm`, `cm`, `pt`, `pc`, `px`; unit-less lengths use 72 dpi for Illustrator files, 96 for
+/// Inkscape 0.92+ and 90 otherwise), the result is in grid units, and SVG defaults apply
+/// (missing fill is black, missing stroke is none).
+pub fn read_scene(svg: &str, physical: bool) -> Result<Scene, String> {
+    let src = fix_namespaces(svg);
+    let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    let doc = roxmltree::Document::parse_with_options(&src, opts).map_err(|e| format!("invalid SVG: {e}"))?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "svg" {
+        return Err("not an SVG document (no <svg> element)".into());
+    }
+    let mut rules = Vec::new();
+    for st in doc.descendants().filter(|n| n.is_element() && n.tag_name().name() == "style") {
+        let css: String = st.children().filter_map(|c| c.text()).collect();
+        parse_css(&css, &mut rules);
+    }
+    let mut ids = std::collections::HashMap::new();
+    for n in doc.descendants().filter(|n| n.is_element()) {
+        if let Some(id) = n.attribute("id") {
+            ids.entry(id).or_insert(n);
+        }
+    }
+    let dpi = detect_dpi(svg);
+    let (ctm, declared_in) = if physical { root_matrix(root, dpi) } else { (IDENT, None) };
+    let inh = if physical {
+        Inh {
+            stroke: Some("none".into()),
+            fill: Some("#000000".into()),
+            width: Some(1.0),
+            font: 16.0,
+            anchor: Anchor::Start,
+            visible: true,
+        }
+    } else {
+        Inh { stroke: None, fill: None, width: None, font: 10.0, anchor: Anchor::Start, visible: true }
+    };
+    let mut w = Walker {
+        ids,
+        rules,
+        out: Vec::new(),
+        bbs: BTreeMap::new(),
+        budget: 200_000,
+        warnings: Vec::new(),
+    };
+    w.walk(root, &Ctx { ctm, inh, hidden: false }, 0, false);
+    let mut shapes = w.out;
+    if physical {
+        // Flattened curves are far finer than the 0.1 in grid needs (tolerance 0.005 unit).
+        for s in &mut shapes {
+            let (pts, min) = match s {
+                Shape::Line { pts, .. } => (pts, 2),
+                Shape::Poly { pts, .. } => (pts, 3),
+                _ => continue,
+            };
+            let simple = simplify(pts, 0.005);
+            if simple.len() >= min {
+                *pts = simple;
+            }
+        }
+    }
+    Ok(Scene { shapes, ids: w.bbs, declared_in, dpi, warnings: w.warnings })
+}
+
+/// Douglas-Peucker simplification keeping both end points; consecutive duplicates are dropped.
+fn simplify(pts: &[[f64; 2]], tol: f64) -> Vec<[f64; 2]> {
+    let mut v: Vec<[f64; 2]> = Vec::with_capacity(pts.len());
+    for p in pts {
+        if v.last().is_none_or(|q| (q[0] - p[0]).hypot(q[1] - p[1]) > 1e-6) {
+            v.push(*p);
+        }
+    }
+    if v.len() <= 2 {
+        return v;
+    }
+    let mut keep = vec![false; v.len()];
+    keep[0] = true;
+    keep[v.len() - 1] = true;
+    let mut stack = vec![(0, v.len() - 1)];
+    while let Some((a, b)) = stack.pop() {
+        let (pa, pb) = (v[a], v[b]);
+        let (dx, dy) = (pb[0] - pa[0], pb[1] - pa[1]);
+        let len = dx.hypot(dy);
+        let mut worst = (0.0, a);
+        for (i, p) in v.iter().enumerate().take(b).skip(a + 1) {
+            let d = if len < 1e-12 {
+                (p[0] - pa[0]).hypot(p[1] - pa[1])
+            } else {
+                ((p[0] - pa[0]) * dy - (p[1] - pa[1]) * dx).abs() / len
+            };
+            if d > worst.0 {
+                worst = (d, i);
+            }
+        }
+        if worst.0 > tol {
+            keep[worst.1] = true;
+            stack.push((a, worst.1));
+            stack.push((worst.1, b));
+        }
+    }
+    v.into_iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| p).collect()
+}
+
+fn detect_dpi(svg: &str) -> f64 {
+    let mut end = svg.len().min(3000);
+    while !svg.is_char_boundary(end) {
+        end -= 1;
+    }
+    let head = &svg[..end];
+    if head.contains("Illustrator") {
+        return 72.0;
+    }
+    if let Some(i) = head.find("inkscape:version=\"") {
+        let v = &head[i + 18..];
+        let mut it = v.split(|c: char| !c.is_ascii_digit() && c != '.').next().unwrap_or("").split('.');
+        let major: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let minor: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        if major > 0 || minor >= 92 {
+            return 96.0;
+        }
+    }
+    90.0
+}
+
+/// A length in inches; unit-less and `px` use `dpi`. Percentages and font-relative units
+/// give `None`.
+fn length_in(s: &str, dpi: f64) -> Option<f64> {
+    let mut sc = Sc::new(s);
+    let v = sc.number()?;
+    match s[sc.i..].trim() {
+        "" | "px" => Some(v / dpi),
+        "in" => Some(v),
+        "mm" => Some(v / 25.4),
+        "cm" => Some(v / 2.54),
+        "pt" => Some(v / 72.0),
+        "pc" => Some(v / 6.0),
+        _ => None,
+    }
+}
+
+/// Matrix from root user units to grid units, and the declared size in inches.
+fn root_matrix(root: roxmltree::Node, dpi: f64) -> (M, Option<[f64; 2]>) {
+    let w = root.attribute("width").and_then(|s| length_in(s, dpi));
+    let h = root.attribute("height").and_then(|s| length_in(s, dpi));
+    let vb = root
+        .attribute("viewBox")
+        .map(numbers)
+        .filter(|v| v.len() == 4 && v[2] > 0.0 && v[3] > 0.0);
+    let fallback = 10.0 / dpi;
+    let (s, org) = match &vb {
+        Some(v) => {
+            let s = match (w.map(|w| w * 10.0 / v[2]), h.map(|h| h * 10.0 / v[3])) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) | (None, Some(a)) => a,
+                (None, None) => fallback,
+            };
+            (s, [v[0], v[1]])
+        }
+        None => (fallback, [0.0, 0.0]),
+    };
+    let declared = match (w, h) {
+        (Some(w), Some(h)) => Some([w, h]),
+        _ => None,
+    };
+    ([s, 0.0, 0.0, s, -s * org[0], -s * org[1]], declared)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -706,6 +904,7 @@ struct Inh {
     width: Option<f64>,
     font: f64,
     anchor: Anchor,
+    visible: bool,
 }
 
 #[derive(Clone)]
@@ -720,33 +919,94 @@ const SKIP: &[&str] = &[
     "linearGradient", "radialGradient", "filter", "script", "foreignObject", "namedview",
 ];
 
-fn is_black(c: &str) -> bool {
-    matches!(c.to_ascii_lowercase().as_str(), "black" | "#000" | "#000000" | "rgb(0,0,0)" | "rgb(0, 0, 0)")
+const NAMED_COLORS: &[(&str, &str)] = &[
+    ("black", "#000000"),
+    ("white", "#ffffff"),
+    ("red", "#ff0000"),
+    ("green", "#008000"),
+    ("lime", "#00ff00"),
+    ("blue", "#0000ff"),
+    ("yellow", "#ffff00"),
+    ("cyan", "#00ffff"),
+    ("aqua", "#00ffff"),
+    ("magenta", "#ff00ff"),
+    ("fuchsia", "#ff00ff"),
+    ("gray", "#808080"),
+    ("grey", "#808080"),
+    ("silver", "#c0c0c0"),
+    ("maroon", "#800000"),
+    ("olive", "#808000"),
+    ("navy", "#000080"),
+    ("purple", "#800080"),
+    ("teal", "#008080"),
+    ("orange", "#ffa500"),
+    ("brown", "#a52a2a"),
+    ("pink", "#ffc0cb"),
+    ("gold", "#ffd700"),
+    ("darkgray", "#a9a9a9"),
+    ("darkgrey", "#a9a9a9"),
+    ("lightgray", "#d3d3d3"),
+    ("lightgrey", "#d3d3d3"),
+];
+
+/// Normalise a CSS colour to lowercase `#rrggbb` when it is a hex colour, `rgb()` triple or
+/// common colour name; anything else is returned unchanged.
+pub fn norm_color(c: &str) -> String {
+    let t = c.trim();
+    let l = t.to_ascii_lowercase();
+    if let Some(h) = l.strip_prefix('#') {
+        if h.chars().all(|x| x.is_ascii_hexdigit()) {
+            match h.len() {
+                6 => return l,
+                3 => return format!("#{}", h.chars().flat_map(|x| [x, x]).collect::<String>()),
+                _ => {}
+            }
+        }
+        return l;
+    }
+    if let Some(args) = l.strip_prefix("rgb(").and_then(|r| r.strip_suffix(')')) {
+        let parts: Vec<&str> = args.split(',').map(str::trim).collect();
+        if parts.len() == 3 {
+            let ch = |p: &str| -> Option<u8> {
+                match p.strip_suffix('%') {
+                    Some(n) => n.trim().parse::<f64>().ok().map(|v| (v * 2.55).round().clamp(0.0, 255.0) as u8),
+                    None => p.parse::<f64>().ok().map(|v| v.round().clamp(0.0, 255.0) as u8),
+                }
+            };
+            if let (Some(r), Some(g), Some(b)) = (ch(parts[0]), ch(parts[1]), ch(parts[2])) {
+                return format!("#{r:02x}{g:02x}{b:02x}");
+            }
+        }
+    }
+    NAMED_COLORS.iter().find(|(n, _)| *n == l).map_or_else(|| t.to_string(), |(_, h)| h.to_string())
 }
 
-/// Style for an emitted shape, or None when it would be invisible.
-fn make_style(inh: &Inh, scale: f64, closed: bool) -> Option<Style> {
+fn is_black(c: &str) -> bool {
+    norm_color(c) == "#000000"
+}
+
+/// Style for an emitted shape, and whether it would be visible at all.
+fn make_style(inh: &Inh, scale: f64, closed: bool) -> (Style, bool) {
     let stroke_none = inh.stroke.as_deref().is_some_and(|s| s == "none" || s.starts_with("url("));
     let stroke = match inh.stroke.as_deref() {
         None => None,
         Some(_) if stroke_none => Some("none".to_string()),
-        Some(c) if is_black(c) => None,
-        Some(c) => Some(c.to_string()),
+        Some(c) if is_black(c) || c.eq_ignore_ascii_case("currentcolor") => None,
+        Some(c) => Some(norm_color(c)),
     };
     let fill = if closed {
         match inh.fill.as_deref() {
             None | Some("none") | Some("transparent") => None,
             Some(c) if c.starts_with("url(") => None,
-            Some(c) if is_black(c) => Some("#000000".to_string()),
-            Some(c) => Some(c.to_string()),
+            Some(c) if c.eq_ignore_ascii_case("currentcolor") => Some("#000000".to_string()),
+            Some(c) => Some(norm_color(c)),
         }
     } else {
         None
     };
-    if stroke_none && fill.is_none() {
-        return None;
-    }
-    Some(Style { stroke, fill, width: inh.width.map(|w| w * scale) })
+    let visible = !(stroke_none && fill.is_none());
+    let width = if stroke_none { None } else { inh.width.map(|w| w * scale) };
+    (Style { stroke, fill, width }, visible)
 }
 
 fn update_inh(inh: &mut Inh, props: &[(String, String)]) {
@@ -756,6 +1016,13 @@ fn update_inh(inh: &mut Inh, props: &[(String, String)]) {
     }
     if let Some(v) = get(props, "fill").filter(|v| *v != "inherit") {
         inh.fill = Some(clean(v));
+    }
+    let zero = |k: &str| get(props, k).and_then(length).is_some_and(|o| o <= 0.0);
+    if zero("fill-opacity") {
+        inh.fill = Some("none".into());
+    }
+    if zero("stroke-opacity") {
+        inh.stroke = Some("none".into());
     }
     if let Some(w) = get(props, "stroke-width").and_then(length) {
         inh.width = Some(w);
@@ -769,107 +1036,165 @@ fn update_inh(inh: &mut Inh, props: &[(String, String)]) {
         Some("start") => inh.anchor = Anchor::Start,
         _ => {}
     }
+    match get(props, "visibility").map(str::trim) {
+        Some("hidden") | Some("collapse") => inh.visible = false,
+        Some("visible") => inh.visible = true,
+        _ => {}
+    }
 }
 
-fn read_shapes(svg: &str) -> Result<Vec<Shape>, String> {
-    let mut out = Vec::new();
-    let root = Ctx {
-        ctm: IDENT,
-        inh: Inh { stroke: None, fill: None, width: None, font: 10.0, anchor: Anchor::Start },
-        hidden: false,
-    };
-    let mut stack = vec![root];
-    let mut saw_svg = false;
-    let mut pos = 0;
-    while let Some((tag, end)) = next_tag(svg, pos) {
-        pos = end;
-        let (name, attrs, self_closing) = match tag {
-            Tag::Close => {
-                if stack.len() > 1 {
-                    stack.pop();
-                }
-                continue;
-            }
-            Tag::Open { name, attrs, self_closing } => (name, attrs, self_closing),
-        };
-        if name == "svg" {
-            saw_svg = true;
+struct Walker<'a, 'i> {
+    ids: std::collections::HashMap<&'a str, roxmltree::Node<'a, 'i>>,
+    rules: Vec<CssRule>,
+    out: Vec<Shape>,
+    bbs: BTreeMap<String, Bb>,
+    budget: usize,
+    warnings: Vec<String>,
+}
+
+impl<'a, 'i> Walker<'a, 'i> {
+    fn warn(&mut self, msg: &str) {
+        if !self.warnings.iter().any(|w| w == msg) {
+            self.warnings.push(msg.to_string());
         }
-        let mut props = attrs;
-        if let Some(st) = get(&props, "style").map(str::to_string) {
-            for decl in st.split(';') {
-                if let Some((k, v)) = decl.split_once(':') {
-                    props.push((k.trim().to_string(), v.trim().to_string()));
-                }
-            }
+    }
+
+    /// Properties of an element: presentation attributes, then matching stylesheet rules (by
+    /// specificity, then order), then the `style` attribute.
+    fn props_of(&self, node: roxmltree::Node<'a, 'i>) -> Props {
+        let mut props: Props = node
+            .attributes()
+            .filter(|a| a.namespace().is_none() || a.name() == "href")
+            .map(|a| (a.name().to_string(), a.value().to_string()))
+            .collect();
+        if !self.rules.is_empty() {
+            let classes: Vec<&str> = get(&props, "class").map(|c| c.split_whitespace().collect()).unwrap_or_default();
+            let mut m: Vec<&CssRule> = self
+                .rules
+                .iter()
+                .filter(|r| r.sel.matches(node.tag_name().name(), node.attribute("id"), &classes))
+                .collect();
+            m.sort_by_key(|r| (r.spec, r.order));
+            let extra: Props = m.iter().flat_map(|r| r.decls.iter().cloned()).collect();
+            props.extend(extra);
         }
-        let mut ctx = stack.last().cloned().expect("stack never empty");
-        ctx.hidden = ctx.hidden || SKIP.contains(&name.as_str()) || get(&props, "display").map(str::trim) == Some("none");
+        if let Some(st) = node.attribute("style") {
+            props.extend(parse_decls(st));
+        }
+        props
+    }
+
+    /// Walk one element; returns the bounding box of its drawn geometry (text excluded).
+    fn walk(&mut self, node: roxmltree::Node<'a, 'i>, parent: &Ctx, depth: usize, force: bool) -> Option<Bb> {
+        if !node.is_element() {
+            return None;
+        }
+        let name = node.tag_name().name();
+        if !force && SKIP.contains(&name) {
+            return None;
+        }
+        if depth > 64 || self.budget == 0 {
+            return None;
+        }
+        self.budget -= 1;
+        let props = self.props_of(node);
+        let mut ctx = parent.clone();
+        let opacity0 = get(&props, "opacity").and_then(length).is_some_and(|o| o <= 0.0);
+        ctx.hidden = ctx.hidden || opacity0 || get(&props, "display").map(str::trim) == Some("none");
         if let Some(t) = get(&props, "transform") {
             ctx.ctm = mul(&ctx.ctm, &parse_transform(t));
         }
+        if name == "svg" && depth > 0 {
+            let (x, y) = (fnum(&props, "x"), fnum(&props, "y"));
+            let mut t: M = [1.0, 0.0, 0.0, 1.0, x, y];
+            let vb = get(&props, "viewBox").map(numbers).filter(|v| v.len() == 4 && v[2] > 0.0 && v[3] > 0.0);
+            let (w, h) = (get(&props, "width").and_then(length), get(&props, "height").and_then(length));
+            if let (Some(v), Some(w), Some(h)) = (vb, w, h) {
+                let (sx, sy) = (w / v[2], h / v[3]);
+                t = mul(&t, &[sx, 0.0, 0.0, sy, -sx * v[0], -sy * v[1]]);
+            }
+            ctx.ctm = mul(&ctx.ctm, &t);
+        }
         update_inh(&mut ctx.inh, &props);
+        let show = !ctx.hidden && ctx.inh.visible;
 
-        if name == "text" {
-            if self_closing {
-                continue;
+        let mut bb: Option<Bb> = None;
+        match name {
+            "text" => {
+                if show {
+                    let content: String = node.descendants().filter(|d| d.is_text()).filter_map(|d| d.text()).collect();
+                    emit_text(&props, &content, &ctx, &mut self.out);
+                }
+                return None;
             }
-            let rel = svg[pos..].find("</text").unwrap_or(svg.len() - pos);
-            let content = &svg[pos..pos + rel];
-            pos = svg[pos + rel..].find('>').map_or(svg.len(), |g| pos + rel + g + 1);
-            if !ctx.hidden {
-                emit_text(&props, content, &ctx, &mut out);
+            "image" => {
+                if show {
+                    self.warn("embedded raster <image> ignored");
+                }
+                return None;
             }
-            continue;
+            "use" => {
+                let href = get(&props, "href").map(|h| h.trim().trim_start_matches('#').to_string());
+                let target = href.and_then(|h| self.ids.get(h.as_str()).copied());
+                let mut c2 = ctx.clone();
+                c2.ctm = mul(&c2.ctm, &[1.0, 0.0, 0.0, 1.0, fnum(&props, "x"), fnum(&props, "y")]);
+                if let Some(t) = target {
+                    bb = self.walk(t, &c2, depth + 1, true);
+                }
+            }
+            _ => {
+                let mut local: Vec<(Shape, bool)> = Vec::new();
+                emit(name, &props, &ctx, &mut local);
+                for (s, vis) in local {
+                    bb = bb_union(bb, shape_bb(&s));
+                    if vis && show {
+                        self.out.push(s);
+                    }
+                }
+                if let Some(f) = get(&props, "fill") {
+                    if f.starts_with("url(") && show {
+                        self.warn("gradient or pattern fill replaced by no fill");
+                    }
+                }
+                for c in node.children().filter(|c| c.is_element()) {
+                    let b = self.walk(c, &ctx, depth + 1, false);
+                    bb = bb_union(bb, b);
+                }
+            }
         }
-        if !ctx.hidden {
-            emit(&name, &props, &ctx, &mut out);
+        if let (Some(id), Some(b)) = (node.attribute("id"), bb) {
+            self.bbs.entry(id.to_string()).or_insert(b);
         }
-        if !self_closing {
-            stack.push(ctx);
-        }
+        bb
     }
-    if !saw_svg {
-        return Err("not an SVG document (no <svg> element)".into());
-    }
-    Ok(out)
 }
 
 fn emit_text(props: &[(String, String)], content: &str, ctx: &Ctx, out: &mut Vec<Shape>) {
-    // Strip nested tags (tspan, ...), decode entities, collapse whitespace.
-    let mut plain = String::new();
-    let mut in_tag = false;
-    for ch in content.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' if in_tag => in_tag = false,
-            c if !in_tag => plain.push(c),
-            _ => {}
-        }
-    }
-    let plain = decode_entities(&plain);
-    let text = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = content.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.is_empty() {
         return;
     }
     let at = apply(&ctx.ctm, [fnum(props, "x"), fnum(props, "y")]);
     let size = ctx.inh.font * det_scale(&ctx.ctm);
-    let style = Style {
-        stroke: None,
-        fill: ctx.inh.fill.as_deref().filter(|f| !is_black(f) && *f != "none").map(str::to_string),
-        width: None,
-    };
+    let fill = ctx.inh.fill.as_deref().filter(|f| !is_black(f) && *f != "none" && !f.starts_with("url(")).map(norm_color);
+    let style = Style { stroke: None, fill, width: None };
     out.push(Shape::Text { at, text, size, anchor: ctx.inh.anchor, style });
 }
 
-fn push_poly(out: &mut Vec<Shape>, pts: &[[f64; 2]], closed: bool, ctx: &Ctx) {
-    let closed = closed && pts.len() >= 3;
-    let Some(style) = make_style(&ctx.inh, det_scale(&ctx.ctm), closed) else { return };
+fn push_poly(out: &mut Vec<(Shape, bool)>, pts: &[[f64; 2]], closed: bool, ctx: &Ctx) {
+    let scale = det_scale(&ctx.ctm);
+    let mut closed = closed && pts.len() >= 3;
+    if !closed && pts.len() >= 3 {
+        // An open path with a fill and no stroke is filled as if it were closed.
+        let (st, _) = make_style(&ctx.inh, scale, true);
+        closed = st.fill.is_some() && st.stroke.as_deref() == Some("none");
+    }
+    let (style, visible) = make_style(&ctx.inh, scale, closed);
     let pts: Vec<[f64; 2]> = pts.iter().map(|p| apply(&ctx.ctm, *p)).collect();
     if pts.len() < 2 {
         return;
     }
-    out.push(if closed { Shape::Poly { pts, style } } else { Shape::Line { pts, style } });
+    out.push((if closed { Shape::Poly { pts, style } } else { Shape::Line { pts, style } }, visible));
 }
 
 fn ellipse_pts(c: [f64; 2], rx: f64, ry: f64) -> Vec<[f64; 2]> {
@@ -881,7 +1206,7 @@ fn ellipse_pts(c: [f64; 2], rx: f64, ry: f64) -> Vec<[f64; 2]> {
         .collect()
 }
 
-fn emit(name: &str, props: &[(String, String)], ctx: &Ctx, out: &mut Vec<Shape>) {
+fn emit(name: &str, props: &[(String, String)], ctx: &Ctx, out: &mut Vec<(Shape, bool)>) {
     let n = |k: &str| fnum(props, k);
     let m = &ctx.ctm;
     match name {
@@ -894,15 +1219,18 @@ fn emit(name: &str, props: &[(String, String)], ctx: &Ctx, out: &mut Vec<Shape>)
         "rect" => {
             let (x, y, w, h) = (n("x"), n("y"), n("width"), n("height"));
             if w <= 0.0 || h <= 0.0 {
+                // Zero-size rectangles (terminal markers) still have a position.
+                let p = apply(m, [x, y]);
+                out.push((Shape::Rect { at: p, size: [0.0, 0.0], r: 0.0, style: Style::default() }, false));
                 return;
             }
             if axis_aligned(m) {
-                let Some(style) = make_style(&ctx.inh, det_scale(m), true) else { return };
+                let (style, visible) = make_style(&ctx.inh, det_scale(m), true);
                 let (p0, p1) = (apply(m, [x, y]), apply(m, [x + w, y + h]));
                 let size = [(p1[0] - p0[0]).abs(), (p1[1] - p0[1]).abs()];
                 let rx = get(props, "rx").and_then(length).or_else(|| get(props, "ry").and_then(length)).unwrap_or(0.0);
                 let r = (rx * m[0].abs()).min(size[0].min(size[1]) / 2.0).max(0.0);
-                out.push(Shape::Rect { at: [p0[0].min(p1[0]), p0[1].min(p1[1])], size, r, style });
+                out.push((Shape::Rect { at: [p0[0].min(p1[0]), p0[1].min(p1[1])], size, r, style }, visible));
             } else {
                 push_poly(out, &[[x, y], [x + w, y], [x + w, y + h], [x, y + h]], true, ctx);
             }
@@ -914,8 +1242,8 @@ fn emit(name: &str, props: &[(String, String)], ctx: &Ctx, out: &mut Vec<Shape>)
             }
             let c = [n("cx"), n("cy")];
             if uniform(m) && (rx - ry).abs() < 1e-9 {
-                let Some(style) = make_style(&ctx.inh, det_scale(m), true) else { return };
-                out.push(Shape::Circle { at: apply(m, c), r: rx * m[0].abs(), style });
+                let (style, visible) = make_style(&ctx.inh, det_scale(m), true);
+                out.push((Shape::Circle { at: apply(m, c), r: rx * m[0].abs(), style }, visible));
             } else {
                 push_poly(out, &ellipse_pts(c, rx, ry), true, ctx);
             }
@@ -1027,7 +1355,7 @@ mod tests {
         let svg = r#"<svg><polygon points="0,0 20,0 10,20" fill="red"/><polyline points="0 30 20 30"/>
             <ellipse cx="10" cy="10" rx="10" ry="5" fill="none"/><ellipse cx="50" cy="10" rx="4" ry="4"/></svg>"#;
         let d = import_svg(svg, "x", &[]).unwrap();
-        assert!(matches!(&d.shapes[0], Shape::Poly { pts, style } if pts.len() == 3 && style.fill.as_deref() == Some("red")));
+        assert!(matches!(&d.shapes[0], Shape::Poly { pts, style } if pts.len() == 3 && style.fill.as_deref() == Some("#ff0000")));
         assert!(matches!(&d.shapes[1], Shape::Line { pts, .. } if pts.len() == 2));
         assert!(matches!(&d.shapes[2], Shape::Poly { pts, .. } if pts.len() == 32));
         assert!(matches!(&d.shapes[3], Shape::Circle { r, .. } if *r == 0.4));
@@ -1096,5 +1424,137 @@ mod tests {
         let Shape::Line { style, .. } = &d.shapes[0] else { panic!() };
         assert_eq!(style.stroke.as_deref(), Some("#ff0000"));
         assert_eq!(style.width, Some(0.3));
+    }
+
+    const CSS_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg"><style type="text/css">
+        /* Illustrator style export */
+        .st0{fill:none;stroke:#000000;stroke-width:2}
+        .st1,.st2{fill:#FF0000;stroke:none}
+        rect.st2{fill:rgb(0, 128, 255)}
+        #special{stroke:#00ff00 !important}
+        @media print { .st3{stroke:blue} }
+        </style>
+        <polyline class="st0" points="0,0 20,0"/>
+        <rect class="st1" x="0" y="10" width="10" height="10"/>
+        <rect class="st1 st2" x="20" y="10" width="10" height="10"/>
+        <line id="special" class="st0" x1="0" y1="30" x2="20" y2="30"/>
+        <line class="st3" x1="0" y1="40" x2="20" y2="40"/>
+        <line class="st0" style="stroke:#112233" x1="0" y1="50" x2="20" y2="50"/></svg>"##;
+
+    #[test]
+    fn css_class_rules_apply_with_specificity_and_precedence() {
+        let sc = read_scene(CSS_SVG, false).unwrap();
+        assert_eq!(sc.shapes.len(), 6);
+        let Shape::Line { style, .. } = &sc.shapes[0] else { panic!() };
+        assert_eq!((style.stroke.as_deref(), style.width), (None, Some(2.0)), "black stroke is the theme colour");
+        let Shape::Rect { style, .. } = &sc.shapes[1] else { panic!() };
+        assert_eq!((style.fill.as_deref(), style.stroke.as_deref()), (Some("#ff0000"), Some("none")));
+        let Shape::Rect { style, .. } = &sc.shapes[2] else { panic!() };
+        assert_eq!(style.fill.as_deref(), Some("#0080ff"), "rect.st2 is more specific than .st1");
+        let Shape::Line { style, .. } = &sc.shapes[3] else { panic!() };
+        assert_eq!(style.stroke.as_deref(), Some("#00ff00"), "#id beats class");
+        let Shape::Line { style, .. } = &sc.shapes[4] else { panic!() };
+        assert_eq!(style.stroke.as_deref(), Some("#0000ff"), "@media content is read");
+        let Shape::Line { style, .. } = &sc.shapes[5] else { panic!() };
+        assert_eq!(style.stroke.as_deref(), Some("#112233"), "style attribute beats classes");
+    }
+
+    #[test]
+    fn colours_are_normalised_to_hex() {
+        assert_eq!(norm_color("#ABC"), "#aabbcc");
+        assert_eq!(norm_color("RGB(255, 0, 0)"), "#ff0000");
+        assert_eq!(norm_color("rgb(100%,0%,0%)"), "#ff0000");
+        assert_eq!(norm_color("Red"), "#ff0000");
+        assert_eq!(norm_color("url(#g)"), "url(#g)");
+    }
+
+    #[test]
+    fn use_references_and_group_styles() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+            <defs><g id="sym"><line x1="0" y1="0" x2="10" y2="0"/></g></defs>
+            <g stroke="#ff0000" stroke-width="4" fill="none">
+              <use xlink:href="#sym" x="5" y="7"/>
+              <use href="#sym" transform="translate(0 20)" stroke="#0000ff"/>
+            </g></svg>"##;
+        let sc = read_scene(svg, false).unwrap();
+        assert_eq!(sc.shapes.len(), 2);
+        let Shape::Line { pts, style } = &sc.shapes[0] else { panic!() };
+        assert_eq!(pts, &vec![[5.0, 7.0], [15.0, 7.0]]);
+        assert_eq!((style.stroke.as_deref(), style.width), (Some("#ff0000"), Some(4.0)));
+        let Shape::Line { pts, style } = &sc.shapes[1] else { panic!() };
+        assert_eq!(pts[0], [0.0, 20.0]);
+        assert_eq!(style.stroke.as_deref(), Some("#0000ff"), "use element overrides the inherited style");
+    }
+
+    #[test]
+    fn physical_units_and_element_boxes() {
+        // 25.4 mm = 1 in = 10 grid units; viewBox 0..25.4.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="25.4mm" height="12.7mm" viewBox="0 0 25.4 12.7">
+            <g id="grp" transform="translate(2.54 0)"><rect id="r" x="0" y="0" width="2.54" height="5.08" fill="none" stroke="#000"/></g></svg>"##;
+        let sc = read_scene(svg, true).unwrap();
+        assert_eq!(sc.declared_in, Some([1.0, 0.5]));
+        let r = sc.ids["r"];
+        for (a, b) in r.iter().zip([1.0, 0.0, 2.0, 2.0]) {
+            assert!((a - b).abs() < 1e-9, "{r:?}");
+        }
+        assert_eq!(sc.ids["grp"], r);
+        // Legacy unit-less sizes: Illustrator 72 dpi, otherwise 90 dpi; px with viewBox scale.
+        let ai = r##"<!-- Generator: Adobe Illustrator 15 --><svg width="72px" height="72px" viewBox="0 0 72 72"><line id="l" x1="0" y1="0" x2="72" y2="0" stroke="#000"/></svg>"##;
+        assert!((read_scene(ai, true).unwrap().ids["l"][2] - 10.0).abs() < 1e-9);
+        let legacy = r##"<svg width="90" height="90"><line id="l" x1="0" y1="0" x2="90" y2="0" stroke="#000"/></svg>"##;
+        assert!((read_scene(legacy, true).unwrap().ids["l"][2] - 10.0).abs() < 1e-9);
+        let no_vb = r##"<svg width="1in" height="1in"><line id="l" x1="0" y1="0" x2="90" y2="0" stroke="#000"/></svg>"##;
+        assert!((read_scene(no_vb, true).unwrap().ids["l"][2] - 10.0).abs() < 1e-9);
+        // Stroke widths scale with the geometry (0.254 mm = 0.1 unit).
+        let w = r##"<svg width="25.4mm" height="25.4mm" viewBox="0 0 25.4 25.4"><line x1="0" y1="1" x2="5" y2="1" stroke="#f00" stroke-width="0.254"/></svg>"##;
+        let Shape::Line { style, .. } = &read_scene(w, true).unwrap().shapes[0] else { panic!() };
+        assert!((style.width.unwrap() - 0.1).abs() < 1e-3);
+    }
+
+    #[test]
+    fn physical_mode_uses_svg_defaults() {
+        // No fill attribute means black, no stroke attribute means none.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 10 10">
+            <path d="M0 0 L5 0 L5 5 Z"/><line x1="0" y1="9" x2="9" y2="9"/>
+            <path d="M0 6 L3 6 L3 8" fill="#ffffff"/></svg>"##;
+        let sc = read_scene(svg, true).unwrap();
+        assert_eq!(sc.shapes.len(), 2, "the unstroked line is invisible");
+        let Shape::Poly { style, .. } = &sc.shapes[0] else { panic!() };
+        assert_eq!((style.fill.as_deref(), style.stroke.as_deref()), (Some("#000000"), Some("none")));
+        assert!(matches!(&sc.shapes[1], Shape::Poly { style, .. } if style.fill.as_deref() == Some("#ffffff")), "open filled path is closed");
+        assert!(sc.ids.is_empty());
+    }
+
+    #[test]
+    fn physical_mode_simplifies_flattened_curves() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 10 10">
+            <path d="M0 5 H8 C8.1 5 8.2 5.05 8.2 5.1" stroke="#f00" fill="none"/>
+            <path d="M0 8 H4 L8 8" stroke="#f00" fill="none"/></svg>"##;
+        let sc = read_scene(svg, true).unwrap();
+        let Shape::Line { pts, .. } = &sc.shapes[0] else { panic!() };
+        assert!(pts.len() <= 6, "{} points", pts.len());
+        assert_eq!(pts[0], [0.0, 5.0]);
+        let Shape::Line { pts, .. } = &sc.shapes[1] else { panic!() };
+        assert_eq!(pts.len(), 2, "collinear points are dropped");
+        assert_eq!(*pts.last().unwrap(), [8.0, 8.0]);
+    }
+
+    #[test]
+    fn invisible_elements_keep_their_boxes() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg"><rect id="t" x="1" y="2" width="0.5" height="0.5" fill="none" stroke="none"/>
+            <rect id="z" x="4" y="4" width="0" height="0"/><g display="none"><line id="h" x1="0" y1="0" x2="3" y2="0" stroke="#000"/></g>
+            <line x1="0" y1="0" x2="10" y2="0" stroke="#000" opacity="0"/></svg>"##;
+        let sc = read_scene(svg, false).unwrap();
+        assert!(sc.shapes.is_empty());
+        assert_eq!(sc.ids["t"], [1.0, 2.0, 1.5, 2.5]);
+        assert_eq!(sc.ids["z"], [4.0, 4.0, 4.0, 4.0]);
+        assert_eq!(sc.ids["h"], [0.0, 0.0, 3.0, 0.0]);
+    }
+
+    #[test]
+    fn doctype_entities_and_missing_prefixes_parse() {
+        let svg = "<?xml version=\"1.0\"?><!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\" [<!ENTITY ns_svg \"http://www.w3.org/2000/svg\">]><svg xmlns=\"&ns_svg;\"><line stroke=\"#f00\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\" inkscape:foo=\"x\"/></svg>";
+        assert_eq!(read_scene(svg, false).unwrap().shapes.len(), 1);
+        assert!(read_scene("<svg><g></svg>", false).is_err());
     }
 }

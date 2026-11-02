@@ -59,13 +59,15 @@ impl Library {
         let mut paths: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
         paths.sort();
         for p in paths {
-            if p.extension().and_then(|e| e.to_str()) != Some("part") {
-                continue;
-            }
-            if let Ok(src) = std::fs::read_to_string(&p) {
-                if let Ok(d) = crate::parse_part(&src) {
-                    self.defs.entry(d.ty.clone()).or_insert(d);
-                }
+            let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+            let def = match ext.as_str() {
+                "part" => std::fs::read_to_string(&p).ok().and_then(|src| crate::parse_part(&src).ok()),
+                // Fritzing parts are imported on the fly with schematic defaults.
+                "fzpz" | "fzp" => crate::fzp::import_path(&p, &crate::fzp::ImportOptions::default()).ok().map(|r| r.0),
+                _ => None,
+            };
+            if let Some(d) = def {
+                self.defs.entry(d.ty.clone()).or_insert(d);
             }
         }
     }

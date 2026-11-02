@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written test fixture: pins without terminalId. -->
+<module moduleId="BarePartModuleID">
+ <title>Bare Part</title>
+ <properties><property name="family">Test</property></properties>
+ <views>
+  <schematicView>
+   <layers image="schematic/bare.svg"><layer layerId="schematic"/></layers>
+  </schematicView>
+ </views>
+ <connectors>
+  <connector id="connector0" name="A">
+   <views><schematicView><p layer="schematic" svgId="connector0pin"/></schematicView></views>
+  </connector>
+  <connector id="connector1" name="B">
+   <views><schematicView><p layer="schematic" svgId="connector1pin"/></schematicView></views>
+  </connector>
+ </connectors>
+</module>

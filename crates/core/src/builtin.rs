@@ -103,6 +103,7 @@ fn dip(n: i32) -> PartDef {
         shapes,
         params: Some(serde_json::json!({"gen": "dip", "pins": n})),
         svg: None,
+        meta: None,
     }
 }
 
@@ -137,6 +138,7 @@ fn header(n: i32) -> PartDef {
         shapes,
         params: Some(serde_json::json!({"gen": "header", "pins": n})),
         svg: None,
+        meta: None,
     }
 }
 

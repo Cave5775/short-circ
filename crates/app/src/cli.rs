@@ -1,7 +1,7 @@
 //! Command line parsing and the non-GUI modes (`--validate`, `--render`, `--list-parts`).
 
 use crate::core_api;
-use short_circ_core::{svgimport, Circuit, Library, PartDef, Report, Severity};
+use short_circ_core::{fzp, svgimport, Circuit, Library, PartDef, Report, Severity};
 use std::path::{Path, PathBuf};
 
 /// `(id, x, y)` pins as taken by `svgimport::import_svg`.
@@ -13,6 +13,7 @@ pub enum Command {
     Validate { file: PathBuf, json: bool },
     Render { file: PathBuf, out: PathBuf, dark: bool },
     ImportSvg { input: PathBuf, out: PathBuf, ty: String, pins: PinSpec, scale: Option<f64> },
+    ImportFritzing { input: PathBuf, out: PathBuf, view: fzp::View, ty: Option<String> },
     ListParts,
     Help,
     Version,
@@ -30,6 +31,9 @@ USAGE:
                                               import SVG artwork as a component file
                                               SPEC is id:x,y entries separated by ; (grid units),
                                               PX is pixels per grid unit (default 10)
+  short-circ --import-fritzing IN OUT [--view schematic|breadboard] [--type NAME]
+                                              import a Fritzing part: IN is a .fzpz, a .fzp or a folder
+                                              of them, OUT a .part file or (for folders) a folder
   short-circ --list-parts                     list available component types
   short-circ --help | --version
 
@@ -46,6 +50,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut positional: Vec<PathBuf> = Vec::new();
     let (mut json, mut dark) = (false, false);
     let (mut ty, mut pins, mut scale) = (None::<String>, None::<String>, None::<String>);
+    let mut view = None::<String>;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -55,6 +60,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--validate" => set_mode(&mut mode, "validate")?,
             "--render" => set_mode(&mut mode, "render")?,
             "--import-svg" => set_mode(&mut mode, "import-svg")?,
+            "--import-fritzing" => set_mode(&mut mode, "import-fritzing")?,
+            "--view" => view = Some(take_value(&mut it, "--view")?),
             "--json" => json = true,
             "--dark" => dark = true,
             "--type" => ty = Some(take_value(&mut it, "--type")?),
@@ -65,6 +72,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         }
     }
     let import_flags = ty.is_some() || pins.is_some() || scale.is_some();
+    if view.is_some() && mode != Some("import-fritzing") {
+        return Err("--view only applies to --import-fritzing".into());
+    }
     match mode {
         None => {
             if json || dark {
@@ -115,6 +125,21 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let scale = scale.map(|s| parse_scale(&s)).transpose()?;
             let out = positional.remove(1);
             Ok(Command::ImportSvg { input: positional.remove(0), out, ty, pins, scale })
+        }
+        Some("import-fritzing") => {
+            if json || dark || pins.is_some() || scale.is_some() {
+                return Err("--import-fritzing only takes --view and --type".into());
+            }
+            if positional.len() != 2 {
+                return Err("--import-fritzing needs IN and OUT".into());
+            }
+            let view = match view {
+                Some(v) => fzp::View::parse(&v).ok_or_else(|| format!("--view must be schematic or breadboard, got {v:?}"))?,
+                None => fzp::View::default(),
+            };
+            let ty = ty.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+            let out = positional.remove(1);
+            Ok(Command::ImportFritzing { input: positional.remove(0), out, view, ty })
         }
         Some(_) => {
             if json {
@@ -209,6 +234,7 @@ pub fn run(cmd: Command) -> i32 {
         Command::ImportSvg { input, out, ty, pins, scale } => {
             import_svg_file(&input, &out, &ty, &pins, scale)
         }
+        Command::ImportFritzing { input, out, view, ty } => import_fritzing(&input, &out, view, ty.as_deref()),
     }
 }
 
@@ -331,6 +357,66 @@ fn import_svg_file(input: &Path, out: &Path, ty: &str, pins: &[(String, i32, i32
         }
         Err(msg) => {
             eprintln!("error: {msg}");
+            1
+        }
+    }
+}
+
+/// `--import-fritzing`. Exit codes: 0 all written, 1 an import or write error, 2 bad arguments.
+fn import_fritzing(input: &Path, out: &Path, view: fzp::View, ty: Option<&str>) -> i32 {
+    let opts = fzp::ImportOptions { view, type_name: ty.map(str::to_string) };
+    let show = |name: &str, part: &PartDef, warnings: &[String], to: &Path| {
+        println!("{}", import_summary(part, to));
+        for w in warnings {
+            eprintln!("warning: {name}: {w}");
+        }
+    };
+    if input.is_dir() {
+        if ty.is_some() {
+            eprintln!("error: --type cannot be used when importing a folder");
+            return 2;
+        }
+        if out.extension().is_some_and(|e| e.eq_ignore_ascii_case("part")) {
+            eprintln!("error: OUT must be a folder when IN is a folder");
+            return 2;
+        }
+        let files = fzp::list_fritzing_files(input);
+        if files.is_empty() {
+            eprintln!("error: no .fzpz or .fzp files in {}", input.display());
+            return 1;
+        }
+        let mut failed = 0;
+        for f in &files {
+            let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            match fzp::import_to_dir(f, out, &opts) {
+                Ok((part, warnings, path)) => show(&name, &part, &warnings, &path),
+                Err(e) => {
+                    eprintln!("error: {name}: {e}");
+                    failed += 1;
+                }
+            }
+        }
+        return if failed > 0 { 1 } else { 0 };
+    }
+    let name = input.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let result = if out.extension().is_some_and(|e| e.eq_ignore_ascii_case("part")) {
+        fzp::import_path(input, &opts).and_then(|(part, warnings)| {
+            if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            }
+            std::fs::write(out, fzp::part_json(&part)?).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+            Ok((part, warnings, out.to_path_buf()))
+        })
+    } else {
+        fzp::import_to_dir(input, out, &opts)
+    };
+    match result {
+        Ok((part, warnings, path)) => {
+            show(&name, &part, &warnings, &path);
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {name}: {e}");
             1
         }
     }
@@ -555,6 +641,62 @@ mod tests {
         assert_eq!(import_svg_file(&svg, &out, "res", &pin_vec("a:0,1"), None), 0);
         let part = short_circ_core::parse_part(&std::fs::read_to_string(&out).unwrap()).unwrap();
         assert_eq!(part.ty, "res");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_fritzing_args() {
+        let want = |view, ty: Option<&str>| Command::ImportFritzing {
+            input: "a.fzpz".into(),
+            out: "o".into(),
+            view,
+            ty: ty.map(str::to_string),
+        };
+        assert_eq!(p(&["--import-fritzing", "a.fzpz", "o"]).unwrap(), want(fzp::View::Schematic, None));
+        assert_eq!(
+            p(&["--view", "breadboard", "--import-fritzing", "a.fzpz", "o", "--type", "x"]).unwrap(),
+            want(fzp::View::Breadboard, Some("x"))
+        );
+        assert!(p(&["--import-fritzing", "a.fzpz"]).is_err());
+        assert!(p(&["--import-fritzing", "a", "b", "c"]).is_err());
+        assert!(p(&["--import-fritzing", "a", "b", "--view", "pcb"]).is_err());
+        assert!(p(&["--import-fritzing", "a", "b", "--pins", "a:0,1"]).is_err());
+        assert!(p(&["--import-fritzing", "a", "b", "--scale", "2"]).is_err());
+        assert!(p(&["--import-fritzing", "a", "b", "--json"]).is_err());
+        assert!(p(&["--view", "schematic", "a.circ"]).is_err());
+        assert!(p(&["--import-fritzing", "a", "b", "--validate"]).is_err());
+        assert!(HELP.contains("--import-fritzing"));
+    }
+
+    #[test]
+    fn import_fritzing_exit_codes_and_outputs() {
+        let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("core").join("tests").join("fixtures");
+        let dir = std::env::temp_dir().join(format!("short-circ-cli-fz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // One fzp to a .part file, with a type override and the breadboard view.
+        let out = dir.join("sub").join("x.part");
+        assert_eq!(import_fritzing(&fx.join("ic4.fzp"), &out, fzp::View::Breadboard, Some("ic4_bb")), 0);
+        let part = short_circ_core::parse_part(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!((part.ty.as_str(), part.pins.len()), ("ic4_bb", 4));
+        // Output folder: named after the type.
+        assert_eq!(import_fritzing(&fx.join("bare.fzp"), &dir.join("parts"), fzp::View::Schematic, None), 0);
+        assert!(dir.join("parts").join("bare_part.part").is_file());
+        // A folder: every part is written, a failing one gives exit 1.
+        let src = dir.join("src");
+        std::fs::create_dir_all(src.join("schematic")).unwrap();
+        std::fs::copy(fx.join("bare.fzp"), src.join("bare.fzp")).unwrap();
+        std::fs::copy(fx.join("schematic").join("bare.svg"), src.join("schematic").join("bare.svg")).unwrap();
+        let folder_out = dir.join("folder_out");
+        assert_eq!(import_fritzing(&src, &folder_out, fzp::View::Schematic, None), 0);
+        assert!(folder_out.join("bare_part.part").is_file());
+        std::fs::write(src.join("broken.fzpz"), b"junk").unwrap();
+        assert_eq!(import_fritzing(&src, &folder_out, fzp::View::Schematic, None), 1);
+        assert_eq!(import_fritzing(&src, &folder_out, fzp::View::Schematic, Some("t")), 2, "--type with a folder");
+        assert_eq!(import_fritzing(&src, &dir.join("o.part"), fzp::View::Schematic, None), 2, "folder to file");
+        // Missing or wrong input.
+        assert_eq!(import_fritzing(&dir.join("missing.fzpz"), &folder_out, fzp::View::Schematic, None), 1);
+        assert_eq!(import_fritzing(&src.join("broken.fzpz"), &folder_out, fzp::View::Schematic, None), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

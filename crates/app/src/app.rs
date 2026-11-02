@@ -4,7 +4,7 @@ use crate::canvas::{self, DrawCtx, Highlight, Theme, View};
 use crate::core_api::{self, Nets};
 use crate::recent::Recent;
 use eframe::egui::{self, Color32, PointerButton, RichText, Sense, Vec2};
-use short_circ_core::{Circuit, Library, Pt, Report, Severity};
+use short_circ_core::{fzp, Circuit, Library, Pt, Report, Severity};
 use std::path::{Path, PathBuf};
 
 struct Loaded {
@@ -21,11 +21,14 @@ enum Action {
     Open(PathBuf),
     ExportSvg,
     FitView,
+    ImportFritzing,
 }
 
 pub struct ShortCircApp {
     loaded: Option<Loaded>,
     error: Option<String>,
+    /// Informational message (e.g. result of a Fritzing import), shown in a dismissable banner.
+    status: Option<String>,
     recent: Recent,
     view: View,
     canvas_size: Vec2,
@@ -48,6 +51,7 @@ impl ShortCircApp {
         let mut app = ShortCircApp {
             loaded: None,
             error: None,
+            status: None,
             recent: Recent::load(),
             view: View::default(),
             canvas_size: Vec2::new(800.0, 600.0),
@@ -111,7 +115,58 @@ impl ShortCircApp {
                 Action::Open(p) => self.load_file(ctx, &p),
                 Action::FitView => self.pending_fit = true,
                 Action::ExportSvg => self.export_svg(),
+                Action::ImportFritzing => self.import_fritzing(),
             }
+        }
+    }
+
+    /// File > Import Fritzing part: convert a .fzpz/.fzp into `parts/` next to the current
+    /// circuit (or next to the exe), then rebuild the library so the new type resolves.
+    fn import_fritzing(&mut self) {
+        let Some(src) = rfd::FileDialog::new().add_filter("Fritzing part", &["fzpz", "fzp"]).pick_file() else {
+            return;
+        };
+        let dir = match self.loaded.as_ref().and_then(|l| l.path.parent()) {
+            Some(d) => d.join("parts"),
+            None => std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.join("parts")))
+                .unwrap_or_else(|| PathBuf::from("parts")),
+        };
+        match fzp::import_to_dir(&src, &dir, &fzp::ImportOptions::default()) {
+            Ok((part, warnings, out)) => {
+                if let Some(l) = &mut self.loaded {
+                    l.lib = Library::load(&l.circuit, l.path.parent());
+                    l.nets = core_api::build_nets(&l.circuit, &l.lib);
+                    l.report = core_api::validate(&l.circuit, &l.lib);
+                }
+                let mut msg = format!("Imported {} ({} pins) to {}", part.ty, part.pins.len(), out.display());
+                for w in &warnings {
+                    msg.push_str(&format!("\nwarning: {w}"));
+                }
+                self.status = Some(msg);
+                self.error = None;
+            }
+            Err(e) => self.error = Some(format!("cannot import {}: {e}", src.display())),
+        }
+    }
+
+    fn status_banner(&mut self, ui: &mut egui::Ui) {
+        let mut dismiss = false;
+        if let Some(msg) = &self.status {
+            egui::Panel::top("status_banner").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Label::new(msg.as_str()).wrap());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Dismiss").clicked() {
+                            dismiss = true;
+                        }
+                    });
+                });
+            });
+        }
+        if dismiss {
+            self.status = None;
         }
     }
 
@@ -163,6 +218,9 @@ impl ShortCircApp {
                 let can_export = self.loaded.is_some() && core_api::svg_available();
                 if ui.add_enabled(can_export, egui::Button::new("Export SVG...")).clicked() {
                     self.actions.push(Action::ExportSvg);
+                }
+                if ui.button("Import Fritzing part...").clicked() {
+                    self.actions.push(Action::ImportFritzing);
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
@@ -427,6 +485,7 @@ impl eframe::App for ShortCircApp {
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         self.banner(ui);
+        self.status_banner(ui);
         if self.show_issues {
             self.issues_panel(ui, &theme);
         }

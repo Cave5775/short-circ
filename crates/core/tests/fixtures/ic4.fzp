@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written test fixture in the Fritzing .fzp layout (no third-party content). -->
+<module fritzingVersion="0.9.3" moduleId="Ic4TestPartModuleID">
+ <version>1</version>
+ <author>short-circ tests</author>
+ <title>IC4 Test Part</title>
+ <label>IC</label>
+ <tags><tag>test</tag><tag>ic</tag></tags>
+ <properties>
+  <property name="family">Test ICs</property>
+  <property name="package">DIP4 [THT]</property>
+  <property name="pins">4</property>
+ </properties>
+ <description>Four pin part used by the importer tests</description>
+ <views>
+  <breadboardView>
+   <layers image="breadboard/ic4_breadboard.svg"><layer layerId="breadboard"/></layers>
+  </breadboardView>
+  <schematicView>
+   <layers image="schematic/ic4_schematic.svg"><layer layerId="schematic"/></layers>
+  </schematicView>
+ </views>
+ <connectors>
+  <connector id="connector0" name="VCC" type="male">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="connector0pin"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="connector0pin" terminalId="connector0terminal"/></schematicView>
+   </views>
+  </connector>
+  <connector id="connector1" name=" GND " type="male">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="connector1pin"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="connector1pin" terminalId="connector1terminal"/></schematicView>
+   </views>
+  </connector>
+  <connector id="connector2" name="OUT" type="male">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="connector2pin"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="connector2pin" terminalId="connector2terminal"/></schematicView>
+   </views>
+  </connector>
+  <connector id="connector3" name="OUT" type="male">
+   <views>
+    <schematicView><p layer="schematic" svgId="connector3pin" terminalId="connector3terminal"/></schematicView>
+   </views>
+  </connector>
+  <connector id="connector4" name="NC" type="male">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="connector4pin"/></breadboardView>
+   </views>
+  </connector>
+ </connectors>
+</module>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Hand-written test fixture: 12.7 x 7.62 mm = 5 x 3 grid units, CSS classes, a transformed group. -->
+<svg xmlns="http://www.w3.org/2000/svg" version="1.2" width="12.7mm" height="7.62mm" viewBox="0 0 12.7 7.62">
+ <style type="text/css"><![CDATA[
+  .body { fill: #ffffff; stroke: #0000ff; stroke-width: 0.25 }
+  .pin, .term-line { fill: none; stroke: #787878; stroke-width: 0.25 }
+  rect.terminal { fill: none; stroke: none }
+ ]]></style>
+ <g id="schematic">
+  <rect class="body" x="2.54" y="0" width="7.62" height="7.62"/>
+  <line class="pin" id="connector0pin" x1="0.254" y1="2.54" x2="2.54" y2="2.54"/>
+  <rect class="terminal" id="connector0terminal" x="0" y="2.413" width="0.254" height="0.254"/>
+  <line class="pin" id="connector1pin" x1="0.254" y1="5.08" x2="2.54" y2="5.08"/>
+  <rect class="terminal" id="connector1terminal" x="0" y="4.953" width="0.254" height="0.254"/>
+  <g transform="translate(10.16 0)">
+   <line class="pin" id="connector2pin" x1="0" y1="2.54" x2="2.286" y2="2.54"/>
+   <rect class="terminal" id="connector2terminal" x="2.413" y="2.413" width="0.254" height="0.254"/>
+   <line class="pin" id="connector3pin" x1="0" y1="5.08" x2="2.286" y2="5.08"/>
+   <rect class="terminal" id="connector3terminal" x="2.413" y="4.953" width="0.254" height="0.254"/>
+  </g>
+  <text x="6.35" y="4" font-size="1.2" text-anchor="middle" fill="#8c8c8c">IC4</text>
+ </g>
+</svg>
