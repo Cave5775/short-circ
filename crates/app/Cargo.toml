@@ -3,6 +3,7 @@ name = "short-circ"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Portable viewer for short-circ circuit files"
 
 [[bin]]
 name = "short-circ"
@@ -11,4 +12,5 @@ path = "src/main.rs"
 [dependencies]
 short-circ-core = { path = "../core" }
 serde_json.workspace = true
-# GUI deps (eframe, rfd) are added by the app work stream.
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+rfd = { version = "0.17.2", default-features = false }
