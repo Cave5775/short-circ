@@ -1,32 +1,24 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "title": "Colours: presets, hex codes, theme and defaults",
-  "theme": {
-    "background": "#fff8e1",
-    "grid": "#e0d6b0",
-    "part": "#37474f",
-    "wire": "#6a1b9a",
-    "label": "#b71c1c",
-    "pin": "#e65100",
-    "junction": "#f57c00"
-  },
   "parts": [
-    {"id": "B1", "type": "battery", "at": [4, 8], "props": {"value": "9V"}, "label_color": "navy"},
-    {"id": "R1", "type": "resistor", "at": [10, 4], "props": {"value": "330"},
-     "color": "red", "fill": "#ffe0b2", "label_color": "brown"},
-    {"id": "R2", "type": "resistor", "at": [22, 4], "props": {"value": "1k"}, "color": "#1a73e8"},
-    {"id": "R3", "type": "resistor", "at": [21, 8], "rot": 90, "props": {"value": "10k"}},
-    {"id": "D1", "type": "led", "at": [32, 4], "props": {"value": "green"}, "color": "green", "fill": "lime"}
+    {"id":"B1","type":"battery","props":{"value":"9V"},"label_color":"navy","schematic":{"at":[4,8]}},
+    {"id":"R1","type":"resistor","props":{"value":"330"},"color":"red","fill":"#ffe0b2","label_color":"brown","schematic":{"at":[10,4]}},
+    {"id":"R2","type":"resistor","props":{"value":"1k"},"color":"#1a73e8","schematic":{"at":[22,4]}},
+    {"id":"R3","type":"resistor","props":{"value":"10k"},"schematic":{"at":[21,8],"rot":90}},
+    {"id":"D1","type":"led","props":{"value":"green"},"color":"green","fill":"lime","schematic":{"at":[32,4]}}
   ],
   "wires": [
-    {"id": "w1", "pts": [[5, 8], [5, 5], [10, 5]], "color": "red"},
-    {"id": "w2", "pts": [[18, 5], [22, 5]], "color": "orange"},
-    {"id": "w3", "pts": [[30, 5], [32, 5]], "color": "#00897b"},
-    {"id": "w4", "pts": [[36, 5], [36, 16], [20, 16], [5, 16], [5, 12]], "color": "default"},
-    {"id": "w5", "pts": [[20, 5], [20, 8]], "color": "gold"}
+    {"id":"w1","view":"schematic","pts":[[5,8],[5,5],[10,5]],"color":"red"},
+    {"id":"w2","view":"schematic","pts":[[18,5],[22,5]],"color":"orange"},
+    {"id":"w3","view":"schematic","pts":[[30,5],[32,5]],"color":"#00897b"},
+    {"id":"w4","view":"schematic","pts":[[36,5],[36,16],[20,16],[5,16],[5,12]],"color":"default"},
+    {"id":"w5","view":"schematic","pts":[[20,5],[20,8]],"color":"gold"}
   ],
   "labels": [
-    {"at": [5, 5], "name": "VCC", "color": "red"},
-    {"at": [5, 16], "name": "GND"}
-  ]
+    {"at":[5,5],"name":"VCC","color":"red"},
+    {"at":[5,16],"name":"GND"}
+  ],
+  "theme": {"background":"#fff8e1","grid":"#e0d6b0","wire":"#6a1b9a","part":"#37474f","label":"#b71c1c","pin":"#e65100","junction":"#f57c00"},
+  "lib": []
 }

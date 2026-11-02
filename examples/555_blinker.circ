@@ -1,0 +1,57 @@
+{
+  "format": "short-circ/2",
+  "title": "555 astable LED blinker (netlist only)",
+  "parts": [
+    {"id":"B1","type":"battery","props":{"value":"9V"},"schematic":{"at":[17,4]},"breadboard":{"at":[8,8]}},
+    {"id":"U1","type":"dip8","props":{"value":"NE555"},"schematic":{"at":[4,4]},"breadboard":{"at":[13,10]}},
+    {"id":"R1","type":"resistor","props":{"value":"1k"},"schematic":{"at":[26,4]},"breadboard":{"at":[17,15],"rot":180}},
+    {"id":"R2","type":"resistor","props":{"value":"47k"},"schematic":{"at":[41,4]},"breadboard":{"at":[19,17],"rot":180}},
+    {"id":"R3","type":"resistor","props":{"value":"330"},"schematic":{"at":[26,19]},"breadboard":{"at":[17,17],"rot":90}},
+    {"id":"C1","type":"capacitor","props":{"value":"10u"},"schematic":{"at":[4,19]},"breadboard":{"at":[15,5]}},
+    {"id":"C2","type":"capacitor","props":{"value":"10n"},"schematic":{"at":[15,19]},"breadboard":{"at":[10,4]}},
+    {"id":"D1","type":"led","props":{"value":"red"},"schematic":{"at":[41,19]},"breadboard":{"at":[13,20],"rot":180}},
+    {"id":"BB1","type":"breadboard_half","props":{},"breadboard":{"at":[0,0]}}
+  ],
+  "wires": [
+    {"id":"w1","view":"schematic","pts":[[41,20],[34,20]]},
+    {"id":"w2","view":"schematic","pts":[[15,20],[12,20],[12,11],[10,11]]},
+    {"id":"w3","view":"schematic","pts":[[10,5],[14,5],[14,2],[18,2],[18,4]]},
+    {"id":"w4","view":"schematic","pts":[[26,5],[22,5],[22,2],[18,2]]},
+    {"id":"w5","view":"schematic","pts":[[4,11],[1,11],[1,1],[14,1],[14,2]]},
+    {"id":"w6","view":"schematic","pts":[[41,5],[34,5]]},
+    {"id":"w7","view":"schematic","pts":[[10,7],[14,7],[14,11],[37,11],[37,5]]},
+    {"id":"w8","view":"schematic","pts":[[10,9],[13,9],[13,13],[51,13],[51,5],[49,5]]},
+    {"id":"w9","view":"schematic","pts":[[4,20],[2,20],[2,24],[22,24],[22,13]]},
+    {"id":"j1","view":"breadboard","pts":[[17,17],[9,17]],"color":"red"},
+    {"id":"j2","view":"breadboard","pts":[[17,15],[14,9]],"color":"red"},
+    {"id":"j3","view":"breadboard","pts":[[11,17],[14,17]],"color":"orange"},
+    {"id":"j4","view":"breadboard","pts":[[11,13],[11,10],[13,10]],"color":"orange"},
+    {"id":"j5","view":"breadboard","pts":[[13,6],[18,6]],"color":"orange"},
+    {"id":"j6","view":"breadboard","pts":[[17,9],[11,9]],"color":"yellow"},
+    {"id":"j7","view":"breadboard","pts":[[15,14],[16,8]],"color":"green"},
+    {"id":"j8","view":"breadboard","pts":[[15,9],[13,9],[13,13]],"color":"blue"},
+    {"id":"j9","view":"breadboard","pts":[[13,15],[19,15]],"color":"blue"},
+    {"id":"j10","view":"breadboard","pts":[[12,21],[12,17]],"color":"purple"}
+  ],
+  "labels": [
+    {"at":[4,9],"name":"OUT"},
+    {"at":[26,20],"name":"OUT"},
+    {"at":[18,8],"name":"GND"},
+    {"at":[4,5],"name":"GND"},
+    {"at":[8,20],"name":"GND"},
+    {"at":[19,20],"name":"GND"},
+    {"at":[45,20],"name":"GND"},
+    {"at":[49,5],"name":"TH"},
+    {"at":[4,7],"name":"TH"}
+  ],
+  "nets": [
+    {"name":"VCC","pins":["B1.pos","U1.8","U1.4","R1.a"]},
+    {"name":"GND","pins":["B1.neg","U1.1","C1.b","C2.b","D1.cathode"]},
+    {"name":"DIS","pins":["R1.b","R2.a","U1.7"]},
+    {"name":"TH","pins":["R2.b","U1.6","U1.2","C1.a"]},
+    {"name":"CTRL","pins":["U1.5","C2.a"]},
+    {"name":"OUT","pins":["U1.3","R3.a"]},
+    {"name":"LED","pins":["R3.b","D1.anode"]}
+  ],
+  "lib": []
+}

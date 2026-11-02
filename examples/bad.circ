@@ -1,15 +1,17 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "title": "Deliberately broken: overlapping wires, crossing, dangling end, overlapping parts",
   "parts": [
-    {"id": "R1", "type": "resistor", "at": [5, 5]},
-    {"id": "R2", "type": "resistor", "at": [8, 5]}
+    {"id":"R1","type":"resistor","props":{},"schematic":{"at":[5,5]}},
+    {"id":"R2","type":"resistor","props":{},"schematic":{"at":[8,5]}}
   ],
   "wires": [
-    {"id": "w1", "pts": [[0, 6], [5, 6]]},
-    {"id": "w2", "pts": [[3, 6], [10, 6]]},
-    {"id": "w3", "pts": [[20, 0], [20, 10]]},
-    {"id": "w4", "pts": [[15, 5], [25, 5]]},
-    {"id": "w5", "pts": [[30, 30], [34, 30]]}
-  ]
+    {"id":"w1","view":"schematic","pts":[[0,6],[5,6]]},
+    {"id":"w2","view":"schematic","pts":[[3,6],[10,6]]},
+    {"id":"w3","view":"schematic","pts":[[20,0],[20,10]]},
+    {"id":"w4","view":"schematic","pts":[[15,5],[25,5]]},
+    {"id":"w5","view":"schematic","pts":[[30,30],[34,30]]}
+  ],
+  "labels": [],
+  "lib": []
 }

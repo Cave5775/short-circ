@@ -48,6 +48,50 @@ fn bad_example_reports_the_deliberate_faults() {
     assert!(!r.ok);
 }
 
+fn example(name: &str) -> String {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    std::fs::read_to_string(root.join(name)).unwrap()
+}
+
+#[test]
+fn led_example_holds_both_views_and_agrees_across_them() {
+    let (c, lib) = load(&example("led.circ"));
+    assert!(short_circ_core::view_in_use(&c, View::Schematic));
+    assert!(short_circ_core::view_in_use(&c, View::Breadboard));
+    let r = validate(&c, &lib);
+    assert!(r.issues.is_empty(), "{:#?}", r.issues);
+}
+
+#[test]
+fn every_example_except_bad_validates_without_errors_and_is_canonical() {
+    for name in ["led.circ", "colors.circ", "breadboard_demo.circ", "nets_only.circ", "555_blinker.circ"] {
+        let src = example(name).replace("\r\n", "\n");
+        let (c, lib) = load(&src);
+        let r = validate(&c, &lib);
+        assert_eq!(r.errors, 0, "{name}: {:#?}", r.issues);
+        let written = short_circ_core::write::circuit_to_string(&c);
+        assert_eq!(written, src, "{name} is not in canonical form (run --upgrade)");
+    }
+}
+
+#[test]
+fn nets_only_example_has_declared_nets_and_no_placements() {
+    let (c, lib) = load(&example("nets_only.circ"));
+    assert!(c.wires.is_empty() && !c.nets.is_empty());
+    assert!(c.parts.iter().all(|p| p.schematic.is_none() && p.breadboard.is_none()));
+    assert_eq!(validate(&c, &lib).errors, 0);
+}
+
+#[test]
+fn blinker_example_is_fully_wired_in_both_views() {
+    let (c, lib) = load(&example("555_blinker.circ"));
+    // No net-open / net-merged / unplaced-part: both views realise every declared net.
+    let r = validate(&c, &lib);
+    assert!(r.issues.is_empty(), "{:#?}", r.issues);
+    assert!(short_circ_core::view_in_use(&c, View::Schematic));
+    assert!(short_circ_core::view_in_use(&c, View::Breadboard));
+}
+
 /// The circuit skill inlines docs/FORMAT.md so Claude has the whole format when the skill loads.
 /// If this fails, run `powershell -File scripts/sync-skill.ps1`.
 #[test]

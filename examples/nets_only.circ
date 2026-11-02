@@ -1,0 +1,26 @@
+{
+  "format": "short-circ/2",
+  "title": "555 astable LED blinker (netlist only)",
+  "parts": [
+    {"id":"B1","type":"battery","props":{"value":"9V"}},
+    {"id":"U1","type":"dip8","props":{"value":"NE555"}},
+    {"id":"R1","type":"resistor","props":{"value":"1k"}},
+    {"id":"R2","type":"resistor","props":{"value":"47k"}},
+    {"id":"R3","type":"resistor","props":{"value":"330"}},
+    {"id":"C1","type":"capacitor","props":{"value":"10u"}},
+    {"id":"C2","type":"capacitor","props":{"value":"10n"}},
+    {"id":"D1","type":"led","props":{"value":"red"}}
+  ],
+  "wires": [],
+  "labels": [],
+  "nets": [
+    {"name":"VCC","pins":["B1.pos","U1.8","U1.4","R1.a"]},
+    {"name":"GND","pins":["B1.neg","U1.1","C1.b","C2.b","D1.cathode"]},
+    {"name":"DIS","pins":["R1.b","R2.a","U1.7"]},
+    {"name":"TH","pins":["R2.b","U1.6","U1.2","C1.a"]},
+    {"name":"CTRL","pins":["U1.5","C2.a"]},
+    {"name":"OUT","pins":["U1.3","R3.a"]},
+    {"name":"LED","pins":["R3.b","D1.anode"]}
+  ],
+  "lib": []
+}

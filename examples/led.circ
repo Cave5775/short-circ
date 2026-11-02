@@ -1,15 +1,20 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "title": "Battery, resistor and LED loop",
   "parts": [
-    {"id": "B1", "type": "battery", "at": [10, 10], "props": {"value": "9V"}},
-    {"id": "R1", "type": "resistor", "at": [14, 6], "props": {"value": "330"}},
-    {"id": "D1", "type": "led", "at": [26, 6], "rot": 90, "props": {"value": "red"}}
+    {"id":"B1","type":"battery","props":{"value":"9V"},"schematic":{"at":[10,10]},"breadboard":{"at":[14,8]}},
+    {"id":"R1","type":"resistor","props":{"value":"330"},"schematic":{"at":[14,6]},"breadboard":{"at":[15,15]}},
+    {"id":"D1","type":"led","props":{"value":"red"},"schematic":{"at":[26,6],"rot":90},"breadboard":{"at":[19,21],"rot":180}},
+    {"id":"BB1","type":"breadboard_half","props":{},"breadboard":{"at":[0,0]}}
   ],
   "wires": [
-    {"id": "w1", "pts": [[11, 10], [11, 7], [14, 7]]},
-    {"id": "w2", "pts": [[22, 7], [25, 7], [25, 6]]},
-    {"id": "w3", "pts": [[25, 10], [25, 16], [11, 16], [11, 14]]}
+    {"id":"w1","view":"schematic","pts":[[11,10],[11,7],[14,7]]},
+    {"id":"w2","view":"schematic","pts":[[22,7],[25,7],[25,6]]},
+    {"id":"w3","view":"schematic","pts":[[25,10],[25,16],[11,16],[11,14]]},
+    {"id":"j1","view":"breadboard","pts":[[19,15],[18,15]],"color":"red"}
   ],
-  "labels": [{"at": [11, 16], "name": "GND"}]
+  "labels": [
+    {"at":[11,16],"name":"GND"}
+  ],
+  "lib": []
 }
