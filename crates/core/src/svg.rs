@@ -341,7 +341,7 @@ fn render(circuit: &Circuit, lib: &dyn PartLookup, dark: bool, view: View, extra
 
 /// Per breadboard wire (file order within the view): the preset colour of its net, assigned to
 /// nets in order of first appearance among the wires.
-fn jumper_colors(circuit: &Circuit, lib: &dyn PartLookup) -> Vec<Option<Rgba>> {
+pub fn jumper_colors(circuit: &Circuit, lib: &dyn PartLookup) -> Vec<Option<Rgba>> {
     let nl = Netlist::build(circuit, lib, View::Breadboard);
     let mut next: HashMap<usize, usize> = HashMap::new();
     nl.wire_net_idx
@@ -355,7 +355,7 @@ fn jumper_colors(circuit: &Circuit, lib: &dyn PartLookup) -> Vec<Option<Rgba>> {
 }
 
 /// Jumper colour: `wire.color`, else `theme.wire` if the theme sets it, else the net colour.
-fn jumper_color(w: &crate::model::Wire, circuit: &Circuit, pal: &Palette, by_net: Option<Rgba>) -> Option<Rgba> {
+pub fn jumper_color(w: &crate::model::Wire, circuit: &Circuit, pal: &Palette, by_net: Option<Rgba>) -> Option<Rgba> {
     let theme_sets = circuit
         .theme
         .as_ref()
@@ -540,6 +540,22 @@ impl Embedded {
         };
         Some(Embedded { view_box, namespaces, inner })
     }
+}
+
+/// A standalone SVG document of a view's `svg` artwork stretched over `size` grid units (the
+/// source `viewBox` kept, `preserveAspectRatio="none"`), exactly as `render_svg` embeds it, with
+/// the same sanitising. The document is `size` user units wide and high, so a rasteriser only
+/// needs a uniform scale. `None` when the source is not well-formed SVG or has script content.
+pub fn artwork_document(src: &str, size: [f64; 2]) -> Option<String> {
+    let e = Embedded::parse(src, size)?;
+    Some(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\"><svg x=\"0\" y=\"0\" width=\"{w}\" height=\"{h}\" viewBox=\"{}\" preserveAspectRatio=\"none\"{}>{}</svg></svg>",
+        esc(&e.view_box),
+        e.namespaces,
+        e.inner,
+        w = num(size[0]),
+        h = num(size[1])
+    ))
 }
 
 /// SVG `transform` value for a placement: `translate` when plain, else an exact `matrix`.
@@ -1165,6 +1181,17 @@ mod tests {
         assert_balanced(&svg);
         assert!(svg.contains("class=\"art\"") && svg.contains(">h1</text>") && svg.contains(">h2</text>"));
         assert!(svg.contains("strip (board), 2x1, 2 pin(s)"));
+    }
+
+    #[test]
+    fn artwork_document_stretches_the_source_over_size() {
+        let src = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10"><rect width="40" height="10"/></svg>"#;
+        let doc = artwork_document(src, [4.0, 1.0]).unwrap();
+        assert!(doc.contains("width=\"4\" height=\"1\" viewBox=\"0 0 4 1\""), "{doc}");
+        assert!(doc.contains("viewBox=\"0 0 40 10\" preserveAspectRatio=\"none\""), "{doc}");
+        assert!(doc.contains("<rect"));
+        assert!(artwork_document("<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>", [1.0, 1.0]).is_none());
+        assert!(artwork_document("not xml", [1.0, 1.0]).is_none());
     }
 
     #[test]
