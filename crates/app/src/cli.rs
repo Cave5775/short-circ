@@ -1,14 +1,18 @@
 //! Command line parsing and the non-GUI modes (`--validate`, `--render`, `--list-parts`).
 
 use crate::core_api;
-use short_circ_core::{Circuit, Library, Report, Severity};
+use short_circ_core::{svgimport, Circuit, Library, PartDef, Report, Severity};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `(id, x, y)` pins as taken by `svgimport::import_svg`.
+pub type PinSpec = Vec<(String, i32, i32)>;
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     Gui(Option<PathBuf>),
     Validate { file: PathBuf, json: bool },
     Render { file: PathBuf, out: PathBuf, dark: bool },
+    ImportSvg { input: PathBuf, out: PathBuf, ty: String, pins: PinSpec, scale: Option<f64> },
     ListParts,
     Help,
     Version,
@@ -22,6 +26,10 @@ USAGE:
   short-circ --validate FILE.circ [--json]    check a circuit (exit 0 ok, 1 errors, 2 unreadable)
   short-circ --render FILE.circ OUT.svg [--dark]
                                               export an SVG image
+  short-circ --import-svg IN.svg OUT.part --type NAME [--pins SPEC] [--scale PX]
+                                              import SVG artwork as a component file
+                                              SPEC is id:x,y entries separated by ; (grid units),
+                                              PX is pixels per grid unit (default 10)
   short-circ --list-parts                     list available component types
   short-circ --help | --version
 
@@ -37,23 +45,33 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         let mut mode: Option<&str> = None;
     let mut positional: Vec<PathBuf> = Vec::new();
     let (mut json, mut dark) = (false, false);
-    for a in args {
+    let (mut ty, mut pins, mut scale) = (None::<String>, None::<String>, None::<String>);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
             "--help" | "-h" => return Ok(Command::Help),
             "--version" | "-V" => return Ok(Command::Version),
             "--list-parts" => set_mode(&mut mode, "list-parts")?,
             "--validate" => set_mode(&mut mode, "validate")?,
             "--render" => set_mode(&mut mode, "render")?,
+            "--import-svg" => set_mode(&mut mode, "import-svg")?,
             "--json" => json = true,
             "--dark" => dark = true,
+            "--type" => ty = Some(take_value(&mut it, "--type")?),
+            "--pins" => pins = Some(take_value(&mut it, "--pins")?),
+            "--scale" => scale = Some(take_value(&mut it, "--scale")?),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => positional.push(PathBuf::from(a)),
         }
     }
+    let import_flags = ty.is_some() || pins.is_some() || scale.is_some();
     match mode {
         None => {
             if json || dark {
                 return Err("--json needs --validate and --dark needs --render".into());
+            }
+            if import_flags {
+                return Err("--type, --pins and --scale need --import-svg".into());
             }
             match positional.len() {
                 0 => Ok(Command::Gui(None)),
@@ -62,7 +80,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
         }
         Some("list-parts") => {
-            if !positional.is_empty() || json || dark {
+            if !positional.is_empty() || json || dark || import_flags {
                 return Err("--list-parts takes no other arguments".into());
             }
             Ok(Command::ListParts)
@@ -71,14 +89,39 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             if dark {
                 return Err("--dark only applies to --render".into());
             }
+            if import_flags {
+                return Err("--type, --pins and --scale only apply to --import-svg".into());
+            }
             if positional.len() != 1 {
                 return Err("--validate needs exactly one FILE".into());
             }
             Ok(Command::Validate { file: positional.remove(0), json })
         }
+        Some("import-svg") => {
+            if json || dark {
+                return Err("--json and --dark do not apply to --import-svg".into());
+            }
+            if positional.len() != 2 {
+                return Err("--import-svg needs IN.svg and OUT.part".into());
+            }
+            let ty = ty
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .ok_or("--import-svg needs --type NAME")?;
+            let pins = match pins {
+                Some(spec) => parse_pins(&spec)?,
+                None => Vec::new(),
+            };
+            let scale = scale.map(|s| parse_scale(&s)).transpose()?;
+            let out = positional.remove(1);
+            Ok(Command::ImportSvg { input: positional.remove(0), out, ty, pins, scale })
+        }
         Some(_) => {
             if json {
                 return Err("--json only applies to --validate".into());
+            }
+            if import_flags {
+                return Err("--type, --pins and --scale only apply to --import-svg".into());
             }
             if positional.len() != 2 {
                 return Err("--render needs FILE and OUT.svg".into());
@@ -87,6 +130,49 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             Ok(Command::Render { file: positional.remove(0), out, dark })
         }
     }
+}
+
+/// Value of a flag that takes one argument (the following word).
+fn take_value(it: &mut std::slice::Iter<'_, String>, flag: &str) -> Result<String, String> {
+    it.next().cloned().ok_or_else(|| format!("{flag} needs a value"))
+}
+
+/// `--scale`: pixels per grid unit, a positive finite number.
+fn parse_scale(s: &str) -> Result<f64, String> {
+    match s.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
+        _ => Err(format!("--scale needs a positive number of pixels per grid unit, got {s:?}")),
+    }
+}
+
+/// `--pins`: `id:x,y` entries separated by `;`. Ids are non-empty and unique, coordinates are
+/// integers in grid units. An empty spec means no pins.
+pub fn parse_pins(spec: &str) -> Result<PinSpec, String> {
+    if spec.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pins: PinSpec = Vec::new();
+    for entry in spec.split(';') {
+        let (id, xy) = entry
+            .split_once(':')
+            .ok_or_else(|| format!("pin {entry:?} must look like id:x,y"))?;
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(format!("pin {entry:?} has an empty id"));
+        }
+        let (x, y) = xy.split_once(',').ok_or_else(|| format!("pin {id} must look like {id}:x,y"))?;
+        let coord = |v: &str| {
+            v.trim()
+                .parse::<i32>()
+                .map_err(|_| format!("pin {id} has a non-integer coordinate {:?}", v.trim()))
+        };
+        let (x, y) = (coord(x)?, coord(y)?);
+        if pins.iter().any(|p| p.0 == id) {
+            return Err(format!("duplicate pin id {id}"));
+        }
+        pins.push((id.to_string(), x, y));
+    }
+    Ok(pins)
 }
 
 fn set_mode<'a>(mode: &mut Option<&'a str>, new: &'a str) -> Result<(), String> {
@@ -120,6 +206,9 @@ pub fn run(cmd: Command) -> i32 {
         }
         Command::Validate { file, json } => validate(&file, json),
         Command::Render { file, out, dark } => render(&file, &out, dark),
+        Command::ImportSvg { input, out, ty, pins, scale } => {
+            import_svg_file(&input, &out, &ty, &pins, scale)
+        }
     }
 }
 
@@ -189,6 +278,59 @@ fn render(file: &Path, out: &Path, dark: bool) -> i32 {
         },
         Err(e) => {
             eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
+/// Import SVG text as a part. Uses `import_svg_scaled` when a scale was given.
+fn import_part(svg: &str, ty: &str, pins: &[(String, i32, i32)], scale: Option<f64>) -> Result<PartDef, String> {
+    match scale {
+        Some(px) => svgimport::import_svg_scaled(svg, ty, pins, px),
+        None => svgimport::import_svg(svg, ty, pins),
+    }
+}
+
+/// Pretty printed JSON for a `.part` file, with a trailing newline.
+fn part_json(part: &PartDef) -> Result<String, String> {
+    serde_json::to_string_pretty(part)
+        .map(|s| s + "\n")
+        .map_err(|e| format!("cannot serialise part: {e}"))
+}
+
+/// One-line summary: type, size in grid units, pin count, output path.
+fn import_summary(part: &PartDef, out: &Path) -> String {
+    format!(
+        "{}: size {}x{}, {} pin(s) -> {}",
+        part.ty,
+        part.size[0],
+        part.size[1],
+        part.pins.len(),
+        out.display()
+    )
+}
+
+/// Exit codes: 0 written, 1 import or write error, 2 unreadable input.
+fn import_svg_file(input: &Path, out: &Path, ty: &str, pins: &[(String, i32, i32)], scale: Option<f64>) -> i32 {
+    let svg = match std::fs::read_to_string(input) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", input.display());
+            return 2;
+        }
+    };
+    let result = import_part(&svg, ty, pins, scale).and_then(|part| {
+        let json = part_json(&part)?;
+        std::fs::write(out, json).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+        Ok(part)
+    });
+    match result {
+        Ok(part) => {
+            println!("{}", import_summary(&part, out));
+            0
+        }
+        Err(msg) => {
+            eprintln!("error: {msg}");
             1
         }
     }
@@ -308,5 +450,111 @@ mod tests {
         let t = report_text(Path::new("x.circ"), &r);
         assert!(t.contains("0 error(s), 1 warning(s)"));
         assert!(t.contains("dangling-wire [w1] at (3,4): m"));
+    }
+
+    const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg"><line x1="0" y1="10" x2="80" y2="10"/><rect x="20" y="0" width="40" height="20" fill="none"/></svg>"#;
+
+    fn pin_vec(spec: &str) -> PinSpec {
+        parse_pins(spec).unwrap()
+    }
+
+    #[test]
+    fn import_svg_args() {
+        let want = Command::ImportSvg {
+            input: "a.svg".into(),
+            out: "a.part".into(),
+            ty: "res".into(),
+            pins: pin_vec("a:0,1;b:8,1"),
+            scale: None,
+        };
+        assert_eq!(p(&["--import-svg", "a.svg", "a.part", "--type", "res", "--pins", "a:0,1;b:8,1"]).unwrap(), want);
+        // Flags in any order.
+        assert_eq!(p(&["--type", "res", "--pins", "a:0,1;b:8,1", "a.svg", "--import-svg", "a.part"]).unwrap(), want);
+        // Pins are optional, scale is optional.
+        assert_eq!(
+            p(&["--import-svg", "a.svg", "a.part", "--type", "res"]).unwrap(),
+            Command::ImportSvg {
+                input: "a.svg".into(),
+                out: "a.part".into(),
+                ty: "res".into(),
+                pins: vec![],
+                scale: None
+            }
+        );
+        assert_eq!(
+            p(&["--import-svg", "a.svg", "a.part", "--type", "res", "--scale", "20.5"]).unwrap(),
+            Command::ImportSvg {
+                input: "a.svg".into(),
+                out: "a.part".into(),
+                ty: "res".into(),
+                pins: vec![],
+                scale: Some(20.5)
+            }
+        );
+    }
+
+    #[test]
+    fn import_svg_arg_errors() {
+        let base = ["--import-svg", "a.svg", "a.part", "--type", "res"];
+        let with = |extra: &[&str]| -> Vec<String> {
+            base.iter().chain(extra.iter()).map(|s| s.to_string()).collect::<Vec<_>>()
+        };
+        assert!(p(&["--import-svg", "a.svg", "a.part"]).is_err(), "--type is required");
+        assert!(p(&["--import-svg", "a.svg", "--type", "res"]).is_err(), "OUT is required");
+        assert!(p(&["--import-svg", "a.svg", "a.part", "b.part", "--type", "res"]).is_err());
+        assert!(p(&["--import-svg", "a.svg", "a.part", "--type"]).is_err(), "value missing");
+        assert!(p(&["--import-svg", "a.svg", "a.part", "--type", "  "]).is_err(), "empty type");
+        assert!(parse(&with(&["--scale", "0"])).is_err());
+        assert!(parse(&with(&["--scale", "-1"])).is_err());
+        assert!(parse(&with(&["--scale", "nan"])).is_err());
+        assert!(parse(&with(&["--scale", "abc"])).is_err());
+        assert!(parse(&with(&["--pins", "a:0"])).is_err());
+        assert!(parse(&with(&["--json"])).is_err());
+        assert!(parse(&with(&["--dark"])).is_err());
+        // Import flags are rejected in other modes.
+        assert!(p(&["--validate", "a.circ", "--type", "res"]).is_err());
+        assert!(p(&["--render", "a.circ", "o.svg", "--scale", "2"]).is_err());
+        assert!(p(&["--list-parts", "--pins", "a:0,1"]).is_err());
+        assert!(p(&["--type", "res", "a.circ"]).is_err(), "no mode given");
+    }
+
+    #[test]
+    fn pin_spec_parsing() {
+        assert_eq!(parse_pins("a:0,1;b:8,1").unwrap(), vec![("a".into(), 0, 1), ("b".into(), 8, 1)]);
+        assert_eq!(parse_pins(" a : -2 , 3 ").unwrap(), vec![("a".into(), -2, 3)]);
+        assert_eq!(parse_pins("").unwrap(), vec![]);
+        for bad in ["a0,1", ":0,1", "a:0", "a:0,1.5", "a:x,1", "a:0,1;", "a:0,1;;b:1,1", "a:0,1;a:2,2"] {
+            assert!(parse_pins(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn import_output_parses_as_part() {
+        let part = import_part(SVG, "res", &pin_vec("a:0,1;b:8,1"), None).unwrap();
+        let json = part_json(&part).unwrap();
+        assert!(json.contains("\n  \""), "pretty printed");
+        let back = short_circ_core::parse_part(&json).unwrap();
+        assert_eq!(back.ty, "res");
+        assert_eq!(back.size, [8.0, 2.0]);
+        assert_eq!(back.pins.len(), 2);
+        assert_eq!(import_summary(&back, Path::new("res.part")), "res: size 8x2, 2 pin(s) -> res.part");
+        // Explicit scale: 80x20 px at 20 px per unit is 4x1, widened to 8 by the pin at x=8.
+        let scaled = import_part(SVG, "res", &pin_vec("a:0,1;b:8,1"), Some(20.0)).unwrap();
+        assert_eq!(scaled.size, [8.0, 1.0]);
+    }
+
+    #[test]
+    fn import_exit_codes() {
+        let dir = std::env::temp_dir().join(format!("short-circ-cli-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (svg, bad, out) = (dir.join("in.svg"), dir.join("bad.svg"), dir.join("out.part"));
+        std::fs::write(&svg, SVG).unwrap();
+        std::fs::write(&bad, "<html/>").unwrap();
+        assert_eq!(import_svg_file(&dir.join("missing.svg"), &out, "res", &[], None), 2, "unreadable input");
+        assert_eq!(import_svg_file(&bad, &out, "res", &[], None), 1, "import error");
+        assert_eq!(import_svg_file(&svg, &out, "res", &pin_vec("a:0,1"), None), 0);
+        let part = short_circ_core::parse_part(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(part.ty, "res");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
