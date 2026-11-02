@@ -29,10 +29,13 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("buzzer", include_str!("../../../parts/buzzer.part")),
     ("voltage_source_ac", include_str!("../../../parts/voltage_source_ac.part")),
     ("connector2", include_str!("../../../parts/connector2.part")),
+    ("breadboard_mini", include_str!("../../../parts/breadboard_mini.part")),
+    ("breadboard_half", include_str!("../../../parts/breadboard_half.part")),
+    ("breadboard_full", include_str!("../../../parts/breadboard_full.part")),
 ];
 
 /// Parametric families by type name, e.g. "dip8", "header4". Returns None if `ty` is not one.
-/// Generated parts have logical pins and a schematic view only.
+/// Generated parts have logical pins, a schematic view and a breadboard view (`gen_bb`).
 ///
 /// `dipN` (N even, 4..=40): two columns of N/2 pins each on a 2-unit pitch, columns 6 units
 /// apart (x = 0 and x = 6). Pin ids "1".."N" are numbered anticlockwise as seen on a real
@@ -107,7 +110,7 @@ fn dip(n: i32) -> PartDef {
         pins,
         buses: Vec::new(),
         schematic: Some(ViewDef { size: [6.0, n as f64], pins: pos, shapes, svg: None }),
-        breadboard: None,
+        breadboard: Some(crate::gen_bb::dip_breadboard(n as usize)),
         params: Some(serde_json::json!({"gen": "dip", "pins": n})),
         meta: None,
     }
@@ -143,7 +146,7 @@ fn header(n: i32) -> PartDef {
         pins,
         buses: Vec::new(),
         schematic: Some(ViewDef { size: [3.0, 2.0 * n as f64], pins: pos, shapes, svg: None }),
-        breadboard: None,
+        breadboard: Some(crate::gen_bb::header_breadboard(n as usize)),
         params: Some(serde_json::json!({"gen": "header", "pins": n})),
         meta: None,
     }
@@ -210,7 +213,8 @@ mod tests {
         let d = generate("dip8").unwrap();
         assert_eq!(d.ty, "dip8");
         assert_eq!(d.schematic.as_ref().unwrap().size, [6.0, 8.0]);
-        assert!(d.breadboard.is_none());
+        let bb = d.breadboard.as_ref().expect("generated dip has a breadboard view");
+        assert_eq!(bb.pins.len(), 8);
         assert_eq!(d.pins.len(), 8);
         assert_eq!(at(&d, "1"), [0, 1]);
         assert_eq!(at(&d, "4"), [0, 7]);

@@ -53,7 +53,7 @@ impl View {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Circuit {
     #[serde(default = "default_format")]
     pub format: String,
@@ -75,6 +75,22 @@ pub struct Circuit {
     /// Circuit-wide colour defaults, see docs/FORMAT.md "Colours".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<Theme>,
+}
+
+impl Default for Circuit {
+    /// An empty circuit tagged with the current format (a derived default would have no tag).
+    fn default() -> Self {
+        Circuit {
+            format: default_format(),
+            title: None,
+            parts: Vec::new(),
+            wires: Vec::new(),
+            labels: Vec::new(),
+            nets: Vec::new(),
+            lib: Vec::new(),
+            theme: None,
+        }
+    }
 }
 
 impl Circuit {
@@ -203,7 +219,7 @@ pub struct Label {
 }
 
 /// A component: logical identity once (`pins`, `buses`), geometry per view.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartDef {
     #[serde(default = "default_format")]
     pub format: String,
@@ -230,6 +246,24 @@ pub struct PartDef {
     /// Free-form string metadata (title, family, source properties of imported parts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<BTreeMap<String, String>>,
+}
+
+impl Default for PartDef {
+    /// An empty definition tagged with the current format (a derived default would have no tag).
+    fn default() -> Self {
+        PartDef {
+            format: default_format(),
+            ty: String::new(),
+            name: String::new(),
+            category: None,
+            pins: Vec::new(),
+            buses: Vec::new(),
+            schematic: None,
+            breadboard: None,
+            params: None,
+            meta: None,
+        }
+    }
 }
 
 impl PartDef {

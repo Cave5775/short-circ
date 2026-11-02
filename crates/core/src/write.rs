@@ -4,7 +4,9 @@
 //! line for `parts`, `wires`, `labels`, `nets`, part `pins`, view `pins`, `shapes` and `buses`,
 //! every entry compact (`{"k":"v"}`, no spaces) with the key order of the model structs, final
 //! newline. Optional and default fields are omitted (a `None`, an empty `props` is kept because
-//! the spec examples always show it, a default `rot`/`mirror`/`r`/`anchor`/text `size`; `dir` is\n//! always written in the schematic view like the spec example and omitted when `left` in the\n//! breadboard view, where it is ignored).
+//! the spec examples always show it, a default `rot`/`mirror`/`r`/`anchor`/text `size`; `dir` is
+//! always written in the schematic view like the spec example and omitted when `left` in the
+//! breadboard view, where it is ignored).
 //! `write(parse(write(x))) == write(x)` byte for byte.
 
 use crate::model::{

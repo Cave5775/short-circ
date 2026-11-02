@@ -1151,7 +1151,8 @@ mod tests {
         assert!(svg.contains(">8</text>"));
         assert!(svg.contains("dip8 - DIP-8 (ic), 6x8, 8 pin(s)"));
         assert!(svg.contains("stroke=\"#8a8a8a\""), "bbox outline");
-        assert!(render_part_svg(&d, View::Breadboard, false).unwrap_err().contains("no breadboard view"));
+        let ground = crate::Library::builtin().get("ground").unwrap().clone();
+        assert!(render_part_svg(&ground, View::Breadboard, false).unwrap_err().contains("no breadboard view"));
         // The input is not modified.
         assert_eq!(d.schematic.as_ref().unwrap().shapes.len(), crate::builtin::generate("dip8").unwrap().schematic.unwrap().shapes.len());
     }

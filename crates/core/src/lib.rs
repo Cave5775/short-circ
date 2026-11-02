@@ -7,6 +7,7 @@
 pub mod builtin;
 pub mod color;
 pub mod edit;
+pub mod gen_bb;
 pub mod migrate;
 pub mod model;
 pub mod netlist;
