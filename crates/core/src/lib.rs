@@ -1,47 +1,37 @@
 //! short-circ core: format model, netlist, validation, SVG export. No GUI dependencies.
-//! Modules are filled in by parallel work streams; see docs/FORMAT.md.
+//! Format `short-circ/2`; see docs/FORMAT.md.
+//!
+//! v2 transition: modules marked `cfg(any())` still speak the v1 model and are switched back
+//! on, one by one, by the core refactor stream (delete the attribute when a module compiles).
 
-pub mod builtin;
 pub mod color;
-pub mod fzp;
+pub mod edit;
+pub mod migrate;
 pub mod model;
-pub mod netlist;
-pub mod resolve;
-pub mod svg;
-pub mod svgimport;
+pub mod route;
 pub mod transform;
+pub mod write;
+
+#[cfg(any())]
+pub mod builtin;
+#[cfg(any())]
+pub mod fzp;
+#[cfg(any())]
+pub mod netlist;
+#[cfg(any())]
+pub mod resolve;
+#[cfg(any())]
+pub mod svg;
+#[cfg(any())]
+pub mod svgimport;
+#[cfg(any())]
 pub mod validate;
 
+pub use migrate::{parse_circuit, parse_part, ParseError};
 pub use model::*;
+#[cfg(any())]
 pub use netlist::{Net, Netlist, PinRef};
+#[cfg(any())]
 pub use resolve::Library;
+#[cfg(any())]
 pub use validate::validate;
-
-/// Parse a `.circ` JSON document.
-pub fn parse_circuit(src: &str) -> Result<Circuit, serde_json::Error> {
-    serde_json::from_str(src)
-}
-
-/// Parse a `.part` JSON document.
-pub fn parse_part(src: &str) -> Result<PartDef, serde_json::Error> {
-    serde_json::from_str(src)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_example_circuit() {
-        let c = parse_circuit(include_str!("../../../examples/led.circ")).unwrap();
-        assert_eq!(c.format, FORMAT);
-        assert!(!c.parts.is_empty());
-    }
-
-    #[test]
-    fn parses_resistor_part() {
-        let p = parse_part(include_str!("../../../parts/resistor.part")).unwrap();
-        assert_eq!(p.ty, "resistor");
-        assert_eq!(p.pins.len(), 2);
-    }
-}
