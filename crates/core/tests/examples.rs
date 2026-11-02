@@ -47,3 +47,26 @@ fn bad_example_reports_the_deliberate_faults() {
     assert!(has("part-overlap", &["R1", "R2"]));
     assert!(!r.ok);
 }
+
+/// The circuit skill inlines docs/FORMAT.md so Claude has the whole format when the skill loads.
+/// If this fails, run `powershell -File scripts/sync-skill.ps1`.
+#[test]
+fn skill_contains_the_current_format_spec() {
+    // Read at run time (not include_str!) so a stale build cache can never hide drift.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let spec = std::fs::read_to_string(root.join("docs/FORMAT.md")).unwrap();
+    let skill = std::fs::read_to_string(root.join(".claude/skills/circuit/SKILL.md")).unwrap();
+    let strip = |l: &str| l.trim_start_matches('#').trim().to_string();
+    let skill_lines: std::collections::HashSet<String> =
+        skill.lines().map(|l| strip(l.trim_end())).collect();
+    let missing: Vec<&str> = spec
+        .lines()
+        .map(|l| l.trim_end())
+        .filter(|l| !strip(l).is_empty() && !skill_lines.contains(&strip(l)))
+        .take(5)
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "SKILL.md is out of date with docs/FORMAT.md (run scripts/sync-skill.ps1); first missing lines: {missing:?}"
+    );
+}
