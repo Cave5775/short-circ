@@ -114,7 +114,7 @@ Exit code: 0 no errors (warnings allowed), 1 errors, 2 unreadable input.
 - `short-circ.exe [file.circ]` open GUI
 - `short-circ.exe --validate file.circ [--json]`
 - `short-circ.exe --render file.circ out.svg [--dark]`
-- `short-circ.exe --import-svg in.svg out.part --type NAME [--pins "a:0,1;b:8,1"]`
+- `short-circ.exe --import-svg in.svg out.part --type NAME [--pins "a:0,1;b:8,1"] [--scale PX_PER_UNIT]`
 - `short-circ.exe --list-parts` prints resolvable component types
 The GUI never requires any of these tools, and nothing in this repo outside `.claude/skills/` refers to Claude.
 
