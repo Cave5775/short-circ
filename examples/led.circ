@@ -1,0 +1,15 @@
+{
+  "format": "short-circ/1",
+  "title": "Battery, resistor and LED loop",
+  "parts": [
+    {"id": "B1", "type": "battery", "at": [10, 10], "props": {"value": "9V"}},
+    {"id": "R1", "type": "resistor", "at": [14, 6], "props": {"value": "330"}},
+    {"id": "D1", "type": "led", "at": [26, 6], "rot": 90, "props": {"value": "red"}}
+  ],
+  "wires": [
+    {"id": "w1", "pts": [[11, 10], [11, 7], [14, 7]]},
+    {"id": "w2", "pts": [[22, 7], [25, 7], [25, 6]]},
+    {"id": "w3", "pts": [[25, 10], [25, 16], [11, 16], [11, 14]]}
+  ],
+  "labels": [{"at": [11, 16], "name": "GND"}]
+}

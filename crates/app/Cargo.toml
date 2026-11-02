@@ -1,0 +1,14 @@
+[package]
+name = "short-circ"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "short-circ"
+path = "src/main.rs"
+
+[dependencies]
+short-circ-core = { path = "../core" }
+serde_json.workspace = true
+# GUI deps (eframe, rfd) are added by the app work stream.

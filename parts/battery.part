@@ -1,0 +1,18 @@
+{
+  "format": "short-circ/1",
+  "type": "battery",
+  "name": "Battery",
+  "category": "source",
+  "size": [2, 4],
+  "pins": [
+    {"id": "pos", "at": [1, 0], "dir": "up"},
+    {"id": "neg", "at": [1, 4], "dir": "down"}
+  ],
+  "shapes": [
+    {"k": "line", "pts": [[1, 0], [1, 1.5]]},
+    {"k": "line", "pts": [[0, 1.5], [2, 1.5]], "width": 0.2},
+    {"k": "line", "pts": [[0.5, 2.5], [1.5, 2.5]], "width": 0.2},
+    {"k": "line", "pts": [[1, 2.5], [1, 4]]},
+    {"k": "text", "at": [2.6, 2.2], "text": "{ref} {value}", "size": 0.9}
+  ]
+}
