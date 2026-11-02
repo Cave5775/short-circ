@@ -406,6 +406,10 @@ fn one_import_holds_both_views() {
     // Buses: A+B joined; the single-member bus and the unknown member are dropped.
     assert_eq!(p.buses, vec![vec!["A".to_string(), "B".to_string()]]);
     assert!(warns.iter().any(|w| w.contains("connector9")), "{warns:?}");
+    // Both views render through the part viewer.
+    for v in View::ALL {
+        assert!(crate::svg::render_part_svg(&p, v, false).is_ok(), "{v:?}");
+    }
 }
 
 #[test]
