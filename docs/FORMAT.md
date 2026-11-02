@@ -67,11 +67,21 @@ Fields:
   - `{"k":"text","at":[x,y],"text":"...","size":1,"anchor":"start|middle|end"}`; `{ref}` expands to the part id, `{value}` to `props.value`, `{prop:name}` to any prop.
 - Optional `params`: for generated families, `{"gen":"dip","pins":8}` is reserved for built-in generators (`dip`, `header`). Third-party parts should just list pins and shapes.
 - Optional `svg`: raw SVG path data string (`d` attribute) imported from elsewhere; converted to `poly`/`line` shapes at load. Ignored if `shapes` present.
+- Optional `meta`: string-to-string map of free-form metadata, never interpreted by the viewer. Imported Fritzing parts carry `source` (`"fritzing"`), `title`, `module_id` (the fzp `moduleId`), `label`, `description`, `tags` (comma separated) and every fzp `<property>` by lowercase name (`family`, `package`, `pins`, `resistance`, ...). Omitted when empty.
+- Shape colours (`stroke`, `fill`) imported from SVG are lowercase `#rrggbb` strings. A black `stroke` is dropped (theme foreground); a black `fill` stays `#000000`.
+
+### Importing Fritzing parts
+`short-circ.exe --import-fritzing` converts a Fritzing part (`.fzpz` bundle, or `.fzp` plus its SVG files) into a `.part`:
+- The chosen view's SVG (`--view schematic`, the default, or `breadboard`) becomes the shapes. Its real size is taken from the root `width`/`height`/`viewBox` (units `in`, `mm`, `cm`, `pt`, `pc`, `px`; unit-less lengths are 72 dpi for Illustrator exports, 96 dpi for Inkscape 0.92+, otherwise 90 dpi) and scaled to the grid, 1 unit = 0.1 in. CSS `<style>` classes, `<use>`, group styles and nested transforms are honoured; SVG defaults apply (fill black, stroke none unless given).
+- One pin per `<connector>` that has a `p` in the chosen view. Pin `id` is the trimmed connector `name`, or the connector `id` when the name is empty or already taken (the original name is kept in the pin's `name`). The position is the centre of the `terminalId` element; without a terminal, the outer end of the `svgId` element if it is a long thin line, else its centre. Positions are rounded to integers (the drawing is shifted by the mean rounding error first when pins are off-grid by 0.08 unit or more), pins that coincide are nudged with a warning, and the whole part is moved so its bounding box starts at `(0,0)`. `dir` points to the nearest edge of `size`.
+- A `{ref}` text is added above the body. Type name: `--type`, else a lowercase letters/digits/underscore slug of the title (then of the moduleId).
+- `.fzpz` and `.fzp` files found in a `parts/` folder are imported on the fly with the defaults above (a `.part` or an earlier source with the same type wins; files that fail to import are ignored).
+- Not handled: PCB view, breadboard legs and multi-layer artwork, buses, gradients and patterns (flat fallback), filters, clip paths, masks, raster images, text fonts.
 
 ## Component resolution order for a part `type`
 1. `lib[]` inside the circuit file
-2. `*.part` files in a `parts/` folder next to the `.circ` file
-3. `*.part` files in a `parts/` folder next to the executable
+2. `*.part` files (and Fritzing `*.fzpz` / `*.fzp`, see below) in a `parts/` folder next to the `.circ` file
+3. the same in a `parts/` folder next to the executable
 4. Built-ins embedded in the executable
 
 ## Connectivity rules (normative; the netlist builder implements exactly this)
@@ -147,8 +157,10 @@ Exit code: 0 no errors (warnings allowed), 1 errors, 2 unreadable input.
 - `short-circ.exe --netlist file.circ [--json]` prints every net as `net ID  NAME-or--  pins: R1.a, B1.pos  wires: w1, w2` (pins sorted naturally, `-` for an empty list). With `--json`: `{"nets":[{"id":0,"name":"GND","pins":["R1.b"],"wires":["w1"]}]}`; `name` is `null` for an unlabelled net. Exit 0 ok, 2 unreadable. Use it to check connectivity as the netlist builder sees it.
 - `short-circ.exe --render-part TYPE out.svg [--dark] [--circuit-dir DIR]` draws one part with every pin id (`id` or `id:name`) labelled at its pin position, plus its declared bounding box and a title line `type - name (category), WxH, N pin(s)`. `TYPE` resolves like a circuit would (`DIR/parts`, the exe's `parts/`, built-ins, generated `dipN`/`headerN`). Exit 0 written, 1 unknown type or write error. Use it to check part geometry and pin placement.
 - `short-circ.exe --import-svg in.svg out.part --type NAME [--pins "a:0,1;b:8,1"] [--scale PX_PER_UNIT]`
+- `short-circ.exe --import-fritzing IN OUT [--view schematic|breadboard] [--type NAME]` imports Fritzing parts. `IN` is a `.fzpz`, a `.fzp`, or a folder (every `.fzpz`/`.fzp` directly inside, not recursive; a `.fzp` next to a `.fzpz` of the same name is skipped). `OUT` is a `.part` file, or a folder (created if missing) that receives `<type>.part`; a folder `IN` needs a folder `OUT` and cannot take `--type`. One summary line per part on stdout (`type: size WxH, N pin(s) -> path`), warnings on stderr (`warning: file: ...`). Exit 0 all imported, 1 an import or write error (other files of a folder are still written), 2 bad arguments.
 - `short-circ.exe --list-parts` prints resolvable component types
 - `short-circ.exe --list-colors` prints the preset colour names with their hex codes
+- In the GUI, File > Import Fritzing part... does the same for one file and writes into `parts/` next to the open circuit (or the executable).
 The GUI never requires any of these tools, and nothing in this repo outside `.claude/skills/` refers to Claude.
 
 ## Clarifications from the reference implementation

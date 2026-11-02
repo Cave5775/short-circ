@@ -116,6 +116,9 @@ pub struct PartDef {
     /// Raw SVG path data, converted to shapes at load if `shapes` is empty.
     #[serde(default)]
     pub svg: Option<String>,
+    /// Free-form string metadata (title, family, source properties of imported parts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

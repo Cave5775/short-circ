@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Hand-written test fixture: unit-less 45 x 36 user units (90 dpi legacy) = 5 x 4 grid units. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="45" height="36" viewBox="0 0 45 36">
+ <rect x="0" y="0" width="45" height="36" style="fill:#333333;stroke:none"/>
+ <circle id="connector0pin" cx="9" cy="9" r="3" fill="#cccccc"/>
+ <circle id="connector1pin" cx="9" cy="27" r="3" fill="#cccccc"/>
+ <circle id="connector2pin" cx="36" cy="9" r="3" fill="#cccccc"/>
+ <circle id="connector4pin" cx="36" cy="27" r="3" fill="#cccccc"/>
+</svg>

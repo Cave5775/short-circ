@@ -3,6 +3,7 @@
 
 pub mod builtin;
 pub mod color;
+pub mod fzp;
 pub mod model;
 pub mod netlist;
 pub mod resolve;

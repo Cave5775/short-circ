@@ -23,6 +23,7 @@ CLI (exit codes: 0 ok, 1 errors found, 2 unreadable input):
 - `short-circ.exe --list-parts` (resolvable component types; `dipN` and `headerN` are generated on demand)
 - `short-circ.exe --list-colors` (preset colour names with hex codes)
 - `short-circ.exe --import-svg IN.svg OUT.part --type NAME [--pins "a:0,1;b:8,1"] [--scale PX_PER_UNIT]`
+- `short-circ.exe --import-fritzing IN OUT [--view schematic|breadboard] [--type NAME]` (exit 0 ok, 1 import error, 2 bad arguments)
 
 ## Workflow
 1. Run `--list-parts`, and read the `.part` files you will use (in `parts/`) to get exact pin ids and positions.
@@ -76,6 +77,21 @@ Pins need integer local positions on the body edge; `size` must cover the pins a
 Import from SVG: `--import-svg` with explicit `--pins` (pin ids and grid positions are your decision; the SVG
 only gives artwork). Then draw a one-part test circuit, `--validate` and `--render` it to check pin alignment.
 Name types in lowercase with underscores.
+
+### Importing Fritzing parts
+`short-circ.exe --import-fritzing PART.fzpz parts/` (or a `.fzp` with its SVGs, or a folder of them; OUT can also be
+a `.part` path) writes `parts/<type>.part` with the graphics and pins from the part's schematic view (`--view
+breadboard` for the breadboard picture). It prints `type: size WxH, N pin(s) -> path` and warnings; read the
+warnings (duplicate pin names, pins moved, unusual size, missing terminals). A `.fzpz` dropped into a `parts/`
+folder is also picked up without conversion, but converting gives a file you can read and edit.
+Check the result before using it:
+1. Open the `.part`: `pins[].id` is the Fritzing connector name (e.g. `VCC`, `Pin 4`; `connectorN` when names
+   clash), `at` the local grid position, `size` the bounding box, `meta` the Fritzing title, family and package.
+   Fritzing sizes are real (1 unit = 0.1 in), so a small part may be only a few units wide.
+2. Make a one-part test circuit that uses the type (`at` e.g. `[10,10]`), `--validate` it and `--render` it; each pin
+   should sit on the end of its drawn pin line. Wire to pins using the positions in the `.part` (world = `at` + local).
+3. If a pin is clearly misplaced or a drawing is missing, fix the `.part` by hand (it is plain JSON) rather than
+   guessing, and tell the user. Fritzing library parts are CC-BY-SA licensed; mention attribution when sharing them.
 
 ## Don'ts
 Do not edit the Rust sources to work around validation. Do not hand-roll connectivity by guessing pin
