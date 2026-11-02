@@ -47,30 +47,38 @@ impl Nets {
 }
 
 /// Build the netlist for a circuit.
-// TODO(merge): wire to core::netlist once merged, e.g.
-//   Netlist::build(circuit, lib).nets.iter().map(|n| Net { id: n.id, name: n.name.clone(),
-//   pins: n.pins.iter().map(|p| PinRef { part: p.part.clone(), pin: p.pin.clone(), at: p.at }).collect(),
-//   wires: n.wires.clone() }).collect()
-pub fn build_nets(_circuit: &Circuit, _lib: &Library) -> Nets {
-    Nets::default()
+pub fn build_nets(circuit: &Circuit, lib: &Library) -> Nets {
+    let nl = short_circ_core::Netlist::build(circuit, lib);
+    let nets = nl
+        .nets
+        .iter()
+        .map(|n| Net {
+            id: n.id,
+            name: n.name.clone().unwrap_or_default(),
+            pins: n
+                .pins
+                .iter()
+                .map(|p| PinRef { part: p.part.clone(), pin: p.pin.clone(), at: p.at })
+                .collect(),
+            wires: n.wires.clone(),
+        })
+        .collect();
+    Nets { nets }
 }
 
 /// Validate a circuit.
-// TODO(merge): wire to core::validate::validate(circuit, lib) once merged.
-pub fn validate(_circuit: &Circuit, _lib: &Library) -> Report {
-    Report::from_issues(vec![])
+pub fn validate(circuit: &Circuit, lib: &Library) -> Report {
+    short_circ_core::validate(circuit, lib)
 }
 
-/// True once `render_svg` produces real output (enables File > Export SVG).
-// TODO(merge): return true once core::svg exists.
+/// True when SVG export is available (enables File > Export SVG).
 pub fn svg_available() -> bool {
-    false
+    true
 }
 
 /// Render the circuit to an SVG document.
-// TODO(merge): wire to core::svg::render_svg(circuit, lib, dark) once merged.
-pub fn render_svg(_circuit: &Circuit, _lib: &Library, _dark: bool) -> Result<String, String> {
-    Err("SVG export is not available in this build".to_string())
+pub fn render_svg(circuit: &Circuit, lib: &Library, dark: bool) -> Result<String, String> {
+    Ok(short_circ_core::svg::render_svg(circuit, lib, dark))
 }
 
 /// Read and parse a circuit file, checking the format tag.
@@ -105,9 +113,17 @@ mod tests {
     }
 
     #[test]
-    fn stub_report_is_ok() {
-        let c = Circuit::default();
+    fn empty_circuit_validates() {
+        let c = parse_circuit_text(r#"{"format":"short-circ/1"}"#).unwrap();
         let r = validate(&c, &Library::builtin());
         assert!(r.ok && r.issues.is_empty());
+    }
+
+    #[test]
+    fn led_example_has_nets_and_svg() {
+        let c = parse_circuit_text(include_str!("../../../examples/led.circ")).unwrap();
+        let lib = Library::load(&c, None);
+        assert!(build_nets(&c, &lib).of_pin("R1", "a").is_some());
+        assert!(render_svg(&c, &lib, false).unwrap().contains("<svg"));
     }
 }
