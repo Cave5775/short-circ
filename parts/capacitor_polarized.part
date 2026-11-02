@@ -1,20 +1,37 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "capacitor_polarized",
   "name": "Polarized capacitor",
   "category": "passive",
-  "size": [4, 2],
   "pins": [
-    {"id": "pos", "at": [0, 1], "dir": "left"},
-    {"id": "neg", "at": [4, 1], "dir": "right"}
+    {"id": "pos"},
+    {"id": "neg"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[0, 1], [1.6, 1]]},
-    {"k": "line", "pts": [[1.6, 0], [1.6, 2]], "width": 0.2},
-    {"k": "arc", "at": [3.9, 1], "r": 1.5, "from": 135, "to": 225, "width": 0.2},
-    {"k": "line", "pts": [[2.4, 1], [4, 1]]},
-    {"k": "text", "at": [0.4, 0.6], "text": "+", "size": 0.9, "anchor": "start"},
-    {"k": "text", "at": [2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
-    {"k": "text", "at": [2, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
-  ]
+  "schematic": {
+    "size": [4, 2],
+    "pins": {
+      "neg": {"at": [4, 1], "dir": "right"},
+      "pos": {"at": [0, 1], "dir": "left"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[0, 1], [1.6, 1]]},
+      {"k": "line", "pts": [[1.6, 0], [1.6, 2]], "width": 0.2},
+      {"k": "arc", "at": [3.9, 1], "r": 1.5, "from": 135, "to": 225, "width": 0.2},
+      {"k": "line", "pts": [[2.4, 1], [4, 1]]},
+      {"k": "text", "at": [0.4, 0.6], "text": "+", "size": 0.9, "anchor": "start"},
+      {"k": "text", "at": [2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+      {"k": "text", "at": [2, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+    ]
+  },
+  "breadboard": {
+    "size": [3, 5],
+    "pins": {
+      "neg": {"at": [2, 5]},
+      "pos": {"at": [1, 5]}
+    },
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 50'><line x1='10' y1='30' x2='10' y2='50' stroke='#b0b0b0' stroke-width='1.6'/><line x1='20' y1='30' x2='20' y2='50' stroke='#b0b0b0' stroke-width='1.6'/><rect x='2' y='3' width='26' height='29' fill='#1f3a5f' rx='3' stroke='#142640' stroke-width='1'/><rect x='19' y='3.5' width='7' height='28' fill='#cfd8dc'/><text x='22.5' y='12' font-family='sans-serif' font-size='8' fill='#1f3a5f' text-anchor='middle'>-</text><text x='22.5' y='20' font-family='sans-serif' font-size='8' fill='#1f3a5f' text-anchor='middle'>-</text><text x='22.5' y='28' font-family='sans-serif' font-size='8' fill='#1f3a5f' text-anchor='middle'>-</text><ellipse cx='15' cy='4' rx='12.5' ry='2.5' fill='#3b5b87'/></svg>"
+  },
+  "meta": {
+    "note": "stripe side is the negative leg (right)"
+  }
 }

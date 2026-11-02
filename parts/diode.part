@@ -1,19 +1,36 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "diode",
   "name": "Diode",
   "category": "semiconductor",
-  "size": [4, 2],
   "pins": [
-    {"id": "anode", "at": [0, 1], "dir": "left"},
-    {"id": "cathode", "at": [4, 1], "dir": "right"}
+    {"id": "anode"},
+    {"id": "cathode"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[0, 1], [1.5, 1]]},
-    {"k": "poly", "pts": [[1.5, 0], [1.5, 2], [2.8, 1]]},
-    {"k": "line", "pts": [[2.8, 0], [2.8, 2]]},
-    {"k": "line", "pts": [[2.8, 1], [4, 1]]},
-    {"k": "text", "at": [2.2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
-    {"k": "text", "at": [2.2, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
-  ]
+  "schematic": {
+    "size": [4, 2],
+    "pins": {
+      "anode": {"at": [0, 1], "dir": "left"},
+      "cathode": {"at": [4, 1], "dir": "right"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[0, 1], [1.5, 1]]},
+      {"k": "poly", "pts": [[1.5, 0], [1.5, 2], [2.8, 1]]},
+      {"k": "line", "pts": [[2.8, 0], [2.8, 2]]},
+      {"k": "line", "pts": [[2.8, 1], [4, 1]]},
+      {"k": "text", "at": [2.2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+      {"k": "text", "at": [2.2, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+    ]
+  },
+  "breadboard": {
+    "size": [4, 2],
+    "pins": {
+      "anode": {"at": [0, 1]},
+      "cathode": {"at": [4, 1]}
+    },
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 20'><line x1='0' y1='10' x2='13' y2='10' stroke='#b0b0b0' stroke-width='1.6'/><line x1='27' y1='10' x2='40' y2='10' stroke='#b0b0b0' stroke-width='1.6'/><rect x='12' y='6' width='16' height='8' fill='#212121' rx='2' stroke='#000000' stroke-width='1'/><rect x='23' y='6' width='3' height='8' fill='#d0d0d0'/></svg>"
+  },
+  "meta": {
+    "note": "silver band marks the cathode (right)"
+  }
 }

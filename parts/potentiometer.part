@@ -1,21 +1,40 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "potentiometer",
   "name": "Potentiometer",
   "category": "passive",
-  "size": [8, 3],
   "pins": [
-    {"id": "a", "at": [0, 2], "dir": "left"},
-    {"id": "b", "at": [8, 2], "dir": "right"},
-    {"id": "wiper", "at": [4, 0], "dir": "up"}
+    {"id": "a"},
+    {"id": "b"},
+    {"id": "wiper"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[0, 2], [2, 2]]},
-    {"k": "rect", "at": [2, 1], "size": [4, 2]},
-    {"k": "line", "pts": [[6, 2], [8, 2]]},
-    {"k": "line", "pts": [[4, 0], [4, 1]]},
-    {"k": "poly", "pts": [[3.6, 0.4], [4.4, 0.4], [4, 1]]},
-    {"k": "text", "at": [4.8, 0.6], "text": "{ref}", "size": 0.9, "anchor": "start"},
-    {"k": "text", "at": [4, 4.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
-  ]
+  "schematic": {
+    "size": [8, 3],
+    "pins": {
+      "a": {"at": [0, 2], "dir": "left"},
+      "b": {"at": [8, 2], "dir": "right"},
+      "wiper": {"at": [4, 0], "dir": "up"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[0, 2], [2, 2]]},
+      {"k": "rect", "at": [2, 1], "size": [4, 2]},
+      {"k": "line", "pts": [[6, 2], [8, 2]]},
+      {"k": "line", "pts": [[4, 0], [4, 1]]},
+      {"k": "poly", "pts": [[3.6, 0.4], [4.4, 0.4], [4, 1]]},
+      {"k": "text", "at": [4.8, 0.6], "text": "{ref}", "size": 0.9, "anchor": "start"},
+      {"k": "text", "at": [4, 4.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+    ]
+  },
+  "breadboard": {
+    "size": [5, 5],
+    "pins": {
+      "a": {"at": [1, 5]},
+      "b": {"at": [3, 5]},
+      "wiper": {"at": [2, 5]}
+    },
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 50 50'><line x1='10' y1='38' x2='10' y2='50' stroke='#b0b0b0' stroke-width='1.6'/><line x1='20' y1='38' x2='20' y2='50' stroke='#b0b0b0' stroke-width='1.6'/><line x1='30' y1='38' x2='30' y2='50' stroke='#b0b0b0' stroke-width='1.6'/><rect x='3' y='3' width='44' height='36' fill='#1565c0' rx='2' stroke='#0d3c78' stroke-width='1'/><circle cx='25' cy='20' r='13' fill='#e0c068' stroke='#a88a30' stroke-width='1'/><line x1='18' y1='12' x2='32' y2='28' stroke='#5a4a10' stroke-width='3' stroke-linecap='round'/></svg>"
+  },
+  "meta": {
+    "note": "trimmer, pins left to right: a, wiper, b"
+  }
 }

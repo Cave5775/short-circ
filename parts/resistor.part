@@ -1,18 +1,32 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "resistor",
   "name": "Resistor",
   "category": "passive",
-  "size": [8, 2],
   "pins": [
-    {"id": "a", "at": [0, 1], "dir": "left"},
-    {"id": "b", "at": [8, 1], "dir": "right"}
+    {"id": "a"},
+    {"id": "b"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[0, 1], [2, 1]]},
-    {"k": "rect", "at": [2, 0], "size": [4, 2]},
-    {"k": "line", "pts": [[6, 1], [8, 1]]},
-    {"k": "text", "at": [4, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
-    {"k": "text", "at": [4, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
-  ]
+  "schematic": {
+    "size": [8, 2],
+    "pins": {
+      "a": {"at": [0, 1], "dir": "left"},
+      "b": {"at": [8, 1], "dir": "right"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[0, 1], [2, 1]]},
+      {"k": "rect", "at": [2, 0], "size": [4, 2]},
+      {"k": "line", "pts": [[6, 1], [8, 1]]},
+      {"k": "text", "at": [4, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+      {"k": "text", "at": [4, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+    ]
+  },
+  "breadboard": {
+    "size": [4, 2],
+    "pins": {
+      "a": {"at": [0, 1]},
+      "b": {"at": [4, 1]}
+    },
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 20'><line x1='0' y1='10' x2='12' y2='10' stroke='#b0b0b0' stroke-width='1.6'/><line x1='28' y1='10' x2='40' y2='10' stroke='#b0b0b0' stroke-width='1.6'/><rect x='11' y='5' width='18' height='10' fill='#d9b98a' rx='4' stroke='#b8985f' stroke-width='1'/><rect x='15' y='5.3' width='2.2' height='9.4' fill='#6d3b1a'/><rect x='19' y='5.1' width='2.2' height='9.8' fill='#111111'/><rect x='23' y='5.1' width='2.2' height='9.8' fill='#c62828'/><rect x='26.2' y='5.3' width='2' height='9.4' fill='#d4a017'/></svg>"
+  }
 }

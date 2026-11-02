@@ -1,16 +1,21 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "ground",
   "name": "Ground",
   "category": "power",
-  "size": [2, 2],
   "pins": [
-    {"id": "gnd", "at": [1, 0], "dir": "up"}
+    {"id": "gnd"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[1, 0], [1, 1]]},
-    {"k": "line", "pts": [[0, 1], [2, 1]], "width": 0.2},
-    {"k": "line", "pts": [[0.4, 1.5], [1.6, 1.5]], "width": 0.2},
-    {"k": "line", "pts": [[0.75, 2], [1.25, 2]], "width": 0.2}
-  ]
+  "schematic": {
+    "size": [2, 2],
+    "pins": {
+      "gnd": {"at": [1, 0], "dir": "up"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[1, 0], [1, 1]]},
+      {"k": "line", "pts": [[0, 1], [2, 1]], "width": 0.2},
+      {"k": "line", "pts": [[0.4, 1.5], [1.6, 1.5]], "width": 0.2},
+      {"k": "line", "pts": [[0.75, 2], [1.25, 2]], "width": 0.2}
+    ]
+  }
 }

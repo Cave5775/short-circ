@@ -1,18 +1,35 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "voltage_source_ac",
   "name": "AC voltage source",
   "category": "source",
-  "size": [4, 4],
   "pins": [
-    {"id": "pos", "at": [2, 0], "dir": "up"},
-    {"id": "neg", "at": [2, 4], "dir": "down"}
+    {"id": "pos"},
+    {"id": "neg"}
   ],
-  "shapes": [
-    {"k": "circle", "at": [2, 2], "r": 2},
-    {"k": "arc", "at": [1.5, 2], "r": 0.5, "from": 180, "to": 360},
-    {"k": "arc", "at": [2.5, 2], "r": 0.5, "from": 0, "to": 180},
-    {"k": "text", "at": [4.6, 1.8], "text": "{ref}", "size": 0.9, "anchor": "start"},
-    {"k": "text", "at": [4.6, 3], "text": "{value}", "size": 0.9, "anchor": "start"}
-  ]
+  "schematic": {
+    "size": [4, 4],
+    "pins": {
+      "neg": {"at": [2, 4], "dir": "down"},
+      "pos": {"at": [2, 0], "dir": "up"}
+    },
+    "shapes": [
+      {"k": "circle", "at": [2, 2], "r": 2},
+      {"k": "arc", "at": [1.5, 2], "r": 0.5, "from": 180, "to": 360},
+      {"k": "arc", "at": [2.5, 2], "r": 0.5, "from": 0, "to": 180},
+      {"k": "text", "at": [4.6, 1.8], "text": "{ref}", "size": 0.9, "anchor": "start"},
+      {"k": "text", "at": [4.6, 3], "text": "{value}", "size": 0.9, "anchor": "start"}
+    ]
+  },
+  "breadboard": {
+    "size": [5, 6],
+    "pins": {
+      "neg": {"at": [3, 6]},
+      "pos": {"at": [1, 6]}
+    },
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 50 60'><path d='M15 32 C15 45 10 45 10 60' fill='none' stroke='#d32f2f' stroke-width='1.8'/><path d='M35 32 C35 45 30 45 30 60' fill='none' stroke='#212121' stroke-width='1.8'/><rect x='5' y='2' width='40' height='30' fill='#eceff1' rx='4' stroke='#607d8b' stroke-width='1'/><path d='M12 17 C16 4 22 4 25 17 S34 30 38 17' fill='none' stroke='#d32f2f' stroke-width='2'/></svg>"
+  },
+  "meta": {
+    "note": "signal source with red positive lead on the left"
+  }
 }

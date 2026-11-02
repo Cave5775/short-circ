@@ -1,19 +1,33 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "capacitor",
   "name": "Capacitor",
   "category": "passive",
-  "size": [4, 2],
   "pins": [
-    {"id": "a", "at": [0, 1], "dir": "left"},
-    {"id": "b", "at": [4, 1], "dir": "right"}
+    {"id": "a"},
+    {"id": "b"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[0, 1], [1.7, 1]]},
-    {"k": "line", "pts": [[1.7, 0], [1.7, 2]], "width": 0.2},
-    {"k": "line", "pts": [[2.3, 0], [2.3, 2]], "width": 0.2},
-    {"k": "line", "pts": [[2.3, 1], [4, 1]]},
-    {"k": "text", "at": [2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
-    {"k": "text", "at": [2, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
-  ]
+  "schematic": {
+    "size": [4, 2],
+    "pins": {
+      "a": {"at": [0, 1], "dir": "left"},
+      "b": {"at": [4, 1], "dir": "right"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[0, 1], [1.7, 1]]},
+      {"k": "line", "pts": [[1.7, 0], [1.7, 2]], "width": 0.2},
+      {"k": "line", "pts": [[2.3, 0], [2.3, 2]], "width": 0.2},
+      {"k": "line", "pts": [[2.3, 1], [4, 1]]},
+      {"k": "text", "at": [2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+      {"k": "text", "at": [2, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+    ]
+  },
+  "breadboard": {
+    "size": [4, 4],
+    "pins": {
+      "a": {"at": [1, 4]},
+      "b": {"at": [3, 4]}
+    },
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'><line x1='10' y1='22' x2='10' y2='40' stroke='#b0b0b0' stroke-width='1.6'/><line x1='30' y1='22' x2='30' y2='40' stroke='#b0b0b0' stroke-width='1.6'/><circle cx='20' cy='15' r='13' fill='#e8a33d' stroke='#b87a1d' stroke-width='1'/><text x='20' y='18' font-family='sans-serif' font-size='8' fill='#5a3a0a' text-anchor='middle'>104</text></svg>"
+  }
 }

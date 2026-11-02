@@ -1,15 +1,20 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "vcc",
   "name": "VCC power symbol",
   "category": "power",
-  "size": [2, 2],
   "pins": [
-    {"id": "vcc", "at": [1, 2], "dir": "down"}
+    {"id": "vcc"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[1, 2], [1, 0.5]]},
-    {"k": "line", "pts": [[0.1, 0.5], [1.9, 0.5]], "width": 0.2},
-    {"k": "text", "at": [1, -0.2], "text": "{value}", "size": 0.9, "anchor": "middle"}
-  ]
+  "schematic": {
+    "size": [2, 2],
+    "pins": {
+      "vcc": {"at": [1, 2], "dir": "down"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[1, 2], [1, 0.5]]},
+      {"k": "line", "pts": [[0.1, 0.5], [1.9, 0.5]], "width": 0.2},
+      {"k": "text", "at": [1, -0.2], "text": "{value}", "size": 0.9, "anchor": "middle"}
+    ]
+  }
 }
