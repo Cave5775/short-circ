@@ -3,6 +3,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
+mod breadboard;
 mod canvas;
 mod cli;
 mod core_api;
@@ -13,6 +14,7 @@ mod partbrowser;
 mod partview;
 mod recent;
 mod reload;
+mod tex;
 mod window;
 
 use std::path::PathBuf;

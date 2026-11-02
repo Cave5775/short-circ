@@ -1,18 +1,16 @@
-//! Single-part views: a one-part circuit with every pin labelled. Used by the `--render-part`
-//! command and by the part browser preview, so imported components can be checked visually.
+//! Single-part views: resolving a type by name, a one-part circuit for the part browser, and the
+//! `--render-part` command (the drawing itself is `short_circ_core::svg::render_part_svg`).
 
-use crate::core_api;
-use short_circ_core::{builtin, Circuit, Label, Library, Part, PartDef, Shape, Style};
-use std::collections::BTreeMap;
+use short_circ_core::{builtin, Circuit, Library, Part, PartDef, Placement, View};
 use std::path::Path;
 
-/// Id of the placed part in the one-part circuit.
-pub const PART_ID: &str = "X";
+/// Id of the placed part in the one-part circuit (the one `render_part_svg` uses too).
+pub use short_circ_core::svg::PART_ID;
 
 /// Resolve a type name the way a circuit would: `parts/` next to `circuit_dir`, the exe's
 /// `parts/`, built-ins, then generated families (`dipN`, `headerN`).
 pub fn resolve_type(ty: &str, circuit_dir: Option<&Path>) -> Option<PartDef> {
-    let probe = Circuit { parts: vec![placed(ty)], ..Default::default() };
+    let probe = Circuit { parts: vec![placed(ty, View::Schematic)], ..Default::default() };
     Library::load(&probe, circuit_dir).get(ty).cloned()
 }
 
@@ -21,74 +19,26 @@ pub fn resolve_in(lib: &Library, ty: &str) -> Option<PartDef> {
     lib.get(ty).cloned().or_else(|| builtin::generate(ty))
 }
 
-fn placed(ty: &str) -> Part {
-    Part { id: PART_ID.into(), ty: ty.into(), at: [0, 0], rot: 0, mirror: false, props: BTreeMap::new(), hidden_label: true, ..Part::default() }
+fn placed(ty: &str, view: View) -> Part {
+    let mut p = Part { id: PART_ID.into(), ty: ty.into(), hidden_label: true, ..Part::default() };
+    *p.placement_mut(view) = Some(Placement::at(0, 0));
+    p
 }
 
-/// Label for a pin: its id, plus its name when it has a different one.
-pub fn pin_caption(id: &str, name: Option<&str>) -> String {
-    match name.map(str::trim) {
-        Some(n) if !n.is_empty() && n != id => format!("{id}:{n}"),
-        _ => id.to_string(),
-    }
+/// A circuit holding exactly `def` (inlined, so no resolution is needed to draw it) placed at the
+/// origin of `view`.
+pub fn preview_circuit(def: &PartDef, view: View) -> Circuit {
+    Circuit { parts: vec![placed(&def.ty, view)], lib: vec![def.clone()], ..Default::default() }
 }
 
-/// One-line description shown as the title: `type - Name (category) WxH, N pins`.
-pub fn describe(def: &PartDef) -> String {
-    let mut s = def.ty.clone();
-    if !def.name.is_empty() && def.name != def.ty {
-        s.push_str(&format!(" - {}", def.name));
-    }
-    if let Some(c) = def.category.as_deref().filter(|c| !c.is_empty()) {
-        s.push_str(&format!(" ({c})"));
-    }
-    s.push_str(&format!(", {}x{}, {} pin(s)", fmt_num(def.size[0]), fmt_num(def.size[1]), def.pins.len()));
-    s
-}
-
-fn fmt_num(v: f64) -> String {
-    if v.fract() == 0.0 {
-        format!("{}", v as i64)
-    } else {
-        format!("{v}")
-    }
-}
-
-/// A circuit holding exactly `def` (inlined, so no resolution is needed to draw it) placed at
-/// the origin, with a net label at every pin carrying the pin id/name, a thin outline of the
-/// declared bounding box, and a title describing the part.
-pub fn single_part_circuit(def: &PartDef) -> Circuit {
-    let mut def = def.clone();
-    def.shapes.push(Shape::Rect {
-        at: [0.0, 0.0],
-        size: def.size,
-        r: 0.0,
-        style: Style { stroke: Some("#8a8a8a".into()), fill: None, width: Some(0.04) },
-    });
-    let labels = def
-        .pins
-        .iter()
-        .map(|p| Label { at: p.at, name: pin_caption(&p.id, p.name.as_deref()), ..Label::default() })
-        .collect();
-    Circuit {
-        title: Some(describe(&def)),
-        parts: vec![placed(&def.ty)],
-        labels,
-        lib: vec![def],
-        ..Default::default()
-    }
-}
-
-/// `--render-part TYPE OUT.svg [--dark] [--circuit-dir DIR]`. Exit 0 written, 1 unknown type
-/// or write error.
-pub fn run(ty: &str, out: &Path, dark: bool, circuit_dir: Option<&Path>) -> i32 {
+/// `--render-part TYPE OUT.svg [--view V] [--dark] [--circuit-dir DIR]`. Exit 0 written, 1 unknown
+/// type, a part without that view, or write error.
+pub fn run(ty: &str, out: &Path, dark: bool, circuit_dir: Option<&Path>, view: View) -> i32 {
     let Some(def) = resolve_type(ty, circuit_dir) else {
         eprintln!("error: unknown part type {ty:?} (see --list-parts; dipN and headerN are generated)");
         return 1;
     };
-    let circuit = single_part_circuit(&def);
-    let lib = Library::load(&circuit, circuit_dir);
-    let svg = match core_api::render_svg(&circuit, &lib, dark) {
+    let svg = match short_circ_core::svg::render_part_svg(&def, view, dark) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
@@ -122,35 +72,16 @@ mod tests {
     }
 
     #[test]
-    fn one_part_circuit_labels_every_pin() {
+    fn preview_circuit_places_one_inlined_part_in_the_view() {
         let def = resolve_type("dip8", None).unwrap();
-        let c = single_part_circuit(&def);
-        assert_eq!(c.parts.len(), 1);
-        assert_eq!(c.parts[0].ty, "dip8");
-        assert_eq!(c.labels.len(), 8);
-        assert_eq!(c.labels[0].name, "1");
-        assert_eq!(c.labels[0].at, def.pins[0].at);
-        assert_eq!(c.lib.len(), 1, "definition is inlined");
-        assert_eq!(c.lib[0].shapes.len(), def.shapes.len() + 1, "bbox outline added");
-        assert!(c.title.as_deref().unwrap().starts_with("dip8 - DIP-8 (ic), 6x8, 8 pin(s)"));
-        // The original is untouched.
-        assert_eq!(def.shapes.len(), c.lib[0].shapes.len() - 1);
-    }
-
-    #[test]
-    fn captions_include_names() {
-        assert_eq!(pin_caption("1", None), "1");
-        assert_eq!(pin_caption("1", Some("VCC")), "1:VCC");
-        assert_eq!(pin_caption("a", Some("a")), "a");
-        assert_eq!(pin_caption("a", Some(" ")), "a");
-    }
-
-    #[test]
-    fn describe_formats_size() {
-        let mut d = resolve_type("resistor", None).unwrap();
-        d.size = [8.0, 2.5];
-        d.category = None;
-        assert!(describe(&d).contains(", 8x2.5, 2 pin(s)"));
+        for view in View::ALL {
+            let c = preview_circuit(&def, view);
+            assert_eq!(c.parts.len(), 1);
+            assert_eq!(c.parts[0].ty, "dip8");
+            assert_eq!(c.lib.len(), 1, "definition is inlined");
+            assert!(c.parts[0].placement(view).is_some() && c.parts[0].placement(view.other()).is_none());
+            assert!(c.parts[0].hidden_label);
+        }
     }
 
     #[test]
@@ -158,13 +89,28 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("short-circ-partview-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("p.svg");
-        assert_eq!(run("dip8", &out, false, None), 0);
+        let sch = View::Schematic;
+        assert_eq!(run("dip8", &out, false, None, sch), 0);
         let svg = std::fs::read_to_string(&out).unwrap();
         assert!(svg.starts_with("<svg"));
         assert_eq!(svg.matches("class=\"label\"").count(), 8, "one label per pin");
         assert!(svg.contains(">8</text>"));
-        assert_eq!(run("no_such_type", &out, true, None), 1);
-        assert_eq!(run("dip8", &dir.join("no/such/dir/p.svg"), false, None), 1, "write failure");
+        assert_eq!(run("no_such_type", &out, true, None, sch), 1);
+        assert_eq!(run("dip8", &dir.join("no/such/dir/p.svg"), false, None, sch), 1, "write failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_view_is_exit_1_and_present_view_renders() {
+        let dir = std::env::temp_dir().join(format!("short-circ-partview-views-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("v.svg");
+        // A board has only a breadboard view, ground only a schematic one.
+        assert_eq!(run("breadboard_half", &out, false, None, View::Schematic), 1);
+        assert_eq!(run("ground", &out, false, None, View::Breadboard), 1);
+        assert_eq!(run("led", &out, false, None, View::Breadboard), 0);
+        assert!(std::fs::read_to_string(&out).unwrap().contains("class=\"art\""), "artwork embedded");
+        assert_eq!(run("breadboard_half", &out, true, None, View::Breadboard), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -179,7 +125,8 @@ mod tests {
         .unwrap();
         assert!(resolve_type("widget", None).is_none());
         let d = resolve_type("widget", Some(&dir)).unwrap();
-        assert_eq!(single_part_circuit(&d).labels[0].name, "p:IN");
+        let svg = short_circ_core::svg::render_part_svg(&d, View::Schematic, false).unwrap();
+        assert!(svg.contains(">p:IN</text>"), "{svg}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

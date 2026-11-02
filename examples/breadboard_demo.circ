@@ -1,0 +1,19 @@
+{
+  "format": "short-circ/2",
+  "title": "LED with resistor on a breadboard",
+  "parts": [
+    {"id":"BB1","type":"breadboard_half","props":{},"breadboard":{"at":[0,0]}},
+    {"id":"B1","type":"battery","props":{"value":"9V"},"schematic":{"at":[10,10]},"breadboard":{"at":[3,32],"rot":180,"mirror":true}},
+    {"id":"R1","type":"resistor","props":{"value":"330"},"schematic":{"at":[14,9]},"breadboard":{"at":[11,15]}},
+    {"id":"D1","type":"led","props":{"value":"red"},"schematic":{"at":[26,9]},"breadboard":{"at":[14,10]}}
+  ],
+  "wires": [
+    {"id":"w1","view":"schematic","pts":[[11,10],[14,10]]},
+    {"id":"w2","view":"schematic","pts":[[22,10],[26,10]]},
+    {"id":"w3","view":"schematic","pts":[[30,10],[30,14],[11,14]]},
+    {"id":"j1","view":"breadboard","pts":[[4,25],[11,17]]},
+    {"id":"j2","view":"breadboard","pts":[[6,25],[16,17]]}
+  ],
+  "labels": [],
+  "lib": []
+}

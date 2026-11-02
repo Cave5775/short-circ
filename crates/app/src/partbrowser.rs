@@ -1,11 +1,14 @@
 //! "Part browser" window: lists every resolvable part type with a preview that draws the part
 //! with its pin ids and names, so imported or hand-written components can be checked by eye.
+//! A schematic / breadboard selector chooses which view of the part is previewed.
 
-use crate::canvas::{self, DrawCtx, Highlight, Theme, View};
+use crate::canvas::{self, Camera, DrawCtx, Highlight, Theme};
 use crate::labels::LabelOpts;
-use crate::partview;
-use eframe::egui::{self, RichText, Sense, Vec2};
-use short_circ_core::{Library, PartDef};
+use crate::tex::TexCache;
+use crate::{breadboard, core_api, partview};
+use eframe::egui::{self, Align2, FontId, RichText, Sense, Vec2};
+use short_circ_core::transform::pin_world;
+use short_circ_core::{Library, PartDef, Placement, View};
 
 #[derive(Default)]
 pub struct PartBrowser {
@@ -16,6 +19,7 @@ pub struct PartBrowser {
     family_error: Option<String>,
     selected: Option<String>,
     show_grid: bool,
+    view: View,
 }
 
 /// Case-insensitive substring filter over type names.
@@ -36,13 +40,23 @@ pub fn check_family(lib: &Library, text: &str) -> Result<String, String> {
     }
 }
 
+/// The view to preview: `wanted` if the part has it, else the other one if that exists, else
+/// `wanted` (the preview then says there is no such view).
+pub fn pick_view(def: &PartDef, wanted: View) -> View {
+    if def.view(wanted).is_some() || def.view(wanted.other()).is_none() {
+        wanted
+    } else {
+        wanted.other()
+    }
+}
+
 impl PartBrowser {
     pub fn new() -> Self {
         PartBrowser { show_grid: true, ..Default::default() }
     }
 
     /// Show the window. `lib` is the open circuit's library (or the default one).
-    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, dark: bool) {
+    pub fn show(&mut self, ctx: &egui::Context, lib: &Library, dark: bool, tex: &mut TexCache) {
         if !self.open {
             return;
         }
@@ -57,7 +71,7 @@ impl PartBrowser {
                 ui.vertical(|ui| {
                     let def = self.selected.as_deref().and_then(|t| partview::resolve_in(lib, t));
                     match def {
-                        Some(def) => self.detail(ui, &def, dark),
+                        Some(def) => self.detail(ui, &def, dark, tex),
                         None => {
                             ui.label("Select a part type on the left.");
                         }
@@ -75,7 +89,11 @@ impl PartBrowser {
         egui::ScrollArea::vertical().id_salt("part_types").max_height(300.0).auto_shrink([false, false]).show(ui, |ui| {
             for t in &types {
                 let on = self.selected.as_deref() == Some(t.as_str());
-                if ui.selectable_label(on, t).clicked() {
+                let label = match lib.get(t) {
+                    Some(d) => format!("{t}  ({})", core_api::view_names(d).replace("schematic", "sch").replace("breadboard", "bb")),
+                    None => t.clone(),
+                };
+                if ui.selectable_label(on, label).clicked() {
                     self.selected = Some(t.clone());
                 }
             }
@@ -98,7 +116,8 @@ impl PartBrowser {
         }
     }
 
-    fn detail(&mut self, ui: &mut egui::Ui, def: &PartDef, dark: bool) {
+    fn detail(&mut self, ui: &mut egui::Ui, def: &PartDef, dark: bool, tex: &mut TexCache) {
+        let view = pick_view(def, self.view);
         ui.heading(&def.ty);
         egui::Grid::new("part_detail").num_columns(2).show(ui, |ui| {
             ui.label("name");
@@ -107,28 +126,62 @@ impl PartBrowser {
             ui.label("category");
             ui.label(def.category.as_deref().filter(|c| !c.is_empty()).unwrap_or("-"));
             ui.end_row();
+            ui.label("views");
+            ui.label(core_api::view_names(def));
+            ui.end_row();
             ui.label("size");
-            ui.label(format!("{} x {} grid units", def.size[0], def.size[1]));
+            ui.label(
+                View::ALL
+                    .iter()
+                    .filter_map(|v| def.view(*v).map(|vd| format!("{} x {} ({})", vd.size[0], vd.size[1], v.key())))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
             ui.end_row();
             ui.label("pins");
             ui.label(def.pins.len().to_string());
             ui.end_row();
         });
-        ui.checkbox(&mut self.show_grid, "Grid");
-        self.preview(ui, def, dark);
+        ui.horizontal(|ui| {
+            for v in View::ALL {
+                let has = def.view(v).is_some();
+                let label = match v {
+                    View::Schematic => "Schematic",
+                    View::Breadboard => "Breadboard",
+                };
+                if ui.add_enabled(has, egui::Button::selectable(view == v, label)).clicked() {
+                    self.view = v;
+                }
+            }
+            ui.checkbox(&mut self.show_grid, "Grid");
+        });
+        self.preview(ui, def, view, dark, tex);
         if !def.pins.is_empty() {
             ui.separator();
             egui::ScrollArea::vertical().id_salt("part_pins").max_height(140.0).show(ui, |ui| {
                 egui::Grid::new("part_pin_table").striped(true).show(ui, |ui| {
-                    for h in ["pin", "name", "at", "dir"] {
-                        ui.strong(h);
+                    let heads: &[&str] = if view == View::Schematic { &["pin", "name", "at", "dir"] } else { &["pin", "name", "at"] };
+                    for h in heads {
+                        ui.strong(*h);
                     }
                     ui.end_row();
                     for p in &def.pins {
                         ui.monospace(&p.id);
                         ui.label(p.name.as_deref().unwrap_or(""));
-                        ui.monospace(format!("({}, {})", p.at[0], p.at[1]));
-                        ui.label(format!("{:?}", p.dir).to_lowercase());
+                        match def.view(view).and_then(|v| v.pins.get(&p.id)) {
+                            Some(pos) => {
+                                ui.monospace(format!("({}, {})", pos.at[0], pos.at[1]));
+                                if view == View::Schematic {
+                                    ui.label(format!("{:?}", pos.dir).to_lowercase());
+                                }
+                            }
+                            None => {
+                                ui.monospace("-");
+                                if view == View::Schematic {
+                                    ui.label("");
+                                }
+                            }
+                        }
                         ui.end_row();
                     }
                 });
@@ -136,30 +189,58 @@ impl PartBrowser {
         }
     }
 
-    fn preview(&self, ui: &mut egui::Ui, def: &PartDef, dark: bool) {
+    fn preview(&self, ui: &mut egui::Ui, def: &PartDef, view: View, dark: bool, tex: &mut TexCache) {
         let size = Vec2::new(ui.available_width().clamp(260.0, 520.0), 260.0);
         let (resp, painter) = ui.allocate_painter(size, Sense::hover());
         let rect = resp.rect;
         let theme = Theme::new(dark);
         painter.rect_filled(rect, 2.0, theme.bg);
-        let circuit = partview::single_part_circuit(def);
+        let Some(vd) = def.view(view) else {
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                format!("{} has no {} view", def.ty, view.key()),
+                FontId::proportional(14.0),
+                theme.fg,
+            );
+            return;
+        };
+        let circuit = partview::preview_circuit(def, view);
         let lib = Library::load(&circuit, None);
-        let Some((lo, hi)) = canvas::circuit_bounds(&circuit, &lib) else { return };
-        let mut view = View::default();
-        view.fit([lo[0] - 1.0, lo[1] - 2.0], [hi[0] + 3.0, hi[1] + 1.0], rect.size(), 10.0);
-        let d = DrawCtx { painter: &painter, origin: rect.min, view, theme, labels: LabelOpts::default() };
+        let Some((lo, hi)) = canvas::circuit_bounds(&circuit, &lib, view) else { return };
+        let mut cam = Camera::default();
+        cam.fit([lo[0] - 1.0, lo[1] - 2.0], [hi[0] + 3.0, hi[1] + 1.0], rect.size(), 10.0);
+        let d = DrawCtx { painter: &painter, origin: rect.min, cam, theme, labels: LabelOpts::default() };
         if self.show_grid {
             canvas::draw_grid(&d, rect.size());
         }
-        canvas::draw_circuit(&d, &circuit, &lib, &[], &Highlight::default(), None);
+        match view {
+            View::Schematic => canvas::draw_schematic(&d, &circuit, &lib, &[], &Highlight::default(), None),
+            View::Breadboard => breadboard::draw(&d, tex, &circuit, &lib, &[], &Highlight::default(), None),
+        }
+        // Declared box and a caption at every pin.
+        let pl = Placement::at(0, 0);
+        let b = egui::Rect::from_min_max(d.pt([0.0, 0.0]), d.pt([vd.size[0], vd.size[1]]));
+        painter.rect_stroke(b, 0.0, egui::Stroke::new(1.0, theme.grid_major), egui::StrokeKind::Outside);
+        let px = (cam.scale * 0.8).clamp(9.0, 14.0);
+        for (pin, pos) in def.placed_pins(view) {
+            let at = pin_world(&pl, pos);
+            let p = d.pt([at[0] as f64 + 0.3, at[1] as f64 - 0.3]);
+            let caption = short_circ_core::svg::pin_caption(&pin.id, pin.name.as_deref());
+            painter.text(p, Align2::LEFT_BOTTOM, caption, FontId::proportional(px), theme.pin);
+        }
         if let Some(pos) = resp.hover_pos() {
-            let w = view.to_world(pos - rect.min);
-            if let Some(h) = canvas::pin_at(&circuit, &lib, w, 0.6) {
+            let w = cam.to_world(pos - rect.min);
+            let tol = if view == View::Breadboard { 0.45 } else { 0.6 };
+            if let Some(h) = canvas::pin_at(&circuit, &lib, view, w, tol) {
+                let at = def.view(view).and_then(|v| v.pins.get(&h.pin)).map(|p| p.at).unwrap_or(h.at);
                 let text = def
                     .pins
                     .iter()
                     .find(|p| p.id == h.pin)
-                    .map(|p| format!("pin {}{}  at ({}, {})", p.id, p.name.as_deref().map(|n| format!(" {n}")).unwrap_or_default(), p.at[0], p.at[1]))
+                    .map(|p| {
+                        format!("pin {}{}  at ({}, {})", p.id, p.name.as_deref().map(|n| format!(" {n}")).unwrap_or_default(), at[0], at[1])
+                    })
                     .unwrap_or(h.pin);
                 canvas::draw_tooltip(&painter, rect, pos, &text, &theme);
             }
@@ -195,5 +276,16 @@ mod tests {
     fn builtin_library_lists_resistor() {
         let lib = Library::builtin();
         assert!(filter_types(lib.types(), "resis").contains(&"resistor".to_string()));
+    }
+
+    #[test]
+    fn preview_view_falls_back_to_the_view_the_part_has() {
+        let lib = Library::builtin();
+        let board = lib.get("breadboard_half").unwrap();
+        assert_eq!(pick_view(board, View::Schematic), View::Breadboard, "boards only have a breadboard view");
+        let both = lib.get("resistor").unwrap();
+        assert_eq!(pick_view(both, View::Schematic), View::Schematic);
+        assert_eq!(pick_view(both, View::Breadboard), View::Breadboard);
+        assert_eq!(pick_view(&PartDef::default(), View::Breadboard), View::Breadboard, "no view at all: keep");
     }
 }

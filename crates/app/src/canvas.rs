@@ -1,11 +1,14 @@
-//! Canvas: view transform, hit testing, junction detection and drawing of circuits.
+//! Canvas: camera, hit testing, junction detection and drawing of the schematic view.
+//! The breadboard view is drawn by `breadboard`; both share the helpers here.
 //! The math is kept free of any egui context so it can be unit tested.
 
-use eframe::egui::{self, Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use crate::labels::{self, LabelOpts};
+use eframe::egui::{self, Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 use short_circ_core::color::{self, Palette, Rgba, Spec};
 use short_circ_core::transform::{pin_world, to_world, world_bbox};
-use short_circ_core::{Anchor, Circuit, Library, Part, PartDef, Pt, Shape as Sh, Style, Wire};
+use short_circ_core::{
+    Anchor, Circuit, Library, Part, PartDef, Placement, Pt, Shape as Sh, Style, View as ModelView, Wire,
+};
 
 /// Grid units per world unit are 1:1; this is pixels per grid unit.
 pub const MIN_SCALE: f32 = 2.0;
@@ -14,23 +17,24 @@ pub const MAX_SCALE: f32 = 240.0;
 pub const UNKNOWN_SIZE: [f64; 2] = [6.0, 2.0];
 
 // ---------------------------------------------------------------------------------------------
-// View transform
+// Camera
 // ---------------------------------------------------------------------------------------------
 
 /// Maps world (grid unit) coordinates to canvas-relative pixels: `p = origin + w * scale`.
+/// (Not to be confused with `short_circ_core::View`, the schematic / breadboard layout.)
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct View {
+pub struct Camera {
     pub origin: Vec2,
     pub scale: f32,
 }
 
-impl Default for View {
+impl Default for Camera {
     fn default() -> Self {
-        View { origin: Vec2::new(40.0, 40.0), scale: 20.0 }
+        Camera { origin: Vec2::new(40.0, 40.0), scale: 20.0 }
     }
 }
 
-impl View {
+impl Camera {
     /// World point to a position relative to the canvas top-left.
     pub fn to_local(self, w: [f64; 2]) -> Vec2 {
         Vec2::new(self.origin.x + w[0] as f32 * self.scale, self.origin.y + w[1] as f32 * self.scale)
@@ -166,10 +170,12 @@ fn on_segment_interior(p: Pt, a: Pt, b: Pt) -> bool {
 }
 
 /// Points where three or more wire segment ends meet: a vertex joins two segments, an endpoint one,
-/// and a point inside another segment (T-junction) counts that segment twice.
+/// and a point inside another segment (T-junction) counts that segment twice. Schematic wires
+/// only (breadboard jumpers never join sideways).
 pub fn junctions(wires: &[Wire]) -> Vec<Pt> {
     let segs: Vec<(Pt, Pt)> = wires
         .iter()
+        .filter(|w| w.view == ModelView::Schematic)
         .flat_map(|w| w.pts.windows(2).map(|s| (s[0], s[1])).collect::<Vec<_>>())
         .filter(|(a, b)| a != b)
         .collect();
@@ -196,16 +202,17 @@ pub fn junctions(wires: &[Wire]) -> Vec<Pt> {
         .collect()
 }
 
-fn corners(part: &Part, size: [f64; 2]) -> [[f64; 2]; 4] {
-    [[0.0, 0.0], [size[0], 0.0], [size[0], size[1]], [0.0, size[1]]].map(|c| to_world(part, c))
+fn corners(pl: &Placement, size: [f64; 2]) -> [[f64; 2]; 4] {
+    [[0.0, 0.0], [size[0], 0.0], [size[0], size[1]], [0.0, size[1]]].map(|c| to_world(pl, c))
 }
 
-/// World bounding box of a placed part (placeholder box for unknown types).
-pub fn part_box(part: &Part, def: Option<&PartDef>) -> ([f64; 2], [f64; 2]) {
-    match def {
-        Some(d) => world_bbox(part, d),
+/// World bounding box of a part placed with `pl` (placeholder box for unknown types and for
+/// types without geometry in the view).
+pub fn part_box(pl: &Placement, def: Option<&PartDef>, view: ModelView) -> ([f64; 2], [f64; 2]) {
+    match def.and_then(|d| d.view(view)) {
+        Some(vd) => world_bbox(pl, vd),
         None => {
-            let cs = corners(part, UNKNOWN_SIZE);
+            let cs = corners(pl, UNKNOWN_SIZE);
             let mut min = cs[0];
             let mut max = cs[0];
             for c in cs {
@@ -217,8 +224,8 @@ pub fn part_box(part: &Part, def: Option<&PartDef>) -> ([f64; 2], [f64; 2]) {
     }
 }
 
-/// Bounding box of everything in the circuit, or None if it is empty.
-pub fn circuit_bounds(circuit: &Circuit, lib: &Library) -> Option<([f64; 2], [f64; 2])> {
+/// Bounding box of everything in `view` of the circuit, or None if it is empty.
+pub fn circuit_bounds(circuit: &Circuit, lib: &Library, view: ModelView) -> Option<([f64; 2], [f64; 2])> {
     let mut acc: Option<([f64; 2], [f64; 2])> = None;
     let mut add = |lo: [f64; 2], hi: [f64; 2]| {
         acc = Some(match acc {
@@ -227,16 +234,20 @@ pub fn circuit_bounds(circuit: &Circuit, lib: &Library) -> Option<([f64; 2], [f6
         });
     };
     for p in &circuit.parts {
-        let (lo, hi) = part_box(p, lib.get(&p.ty));
-        add(lo, hi);
+        if let Some(pl) = p.placement(view) {
+            let (lo, hi) = part_box(pl, lib.get(&p.ty), view);
+            add(lo, hi);
+        }
     }
-    for w in &circuit.wires {
+    for w in circuit.wires_in(view) {
         for pt in &w.pts {
             add([pt[0] as f64, pt[1] as f64], [pt[0] as f64, pt[1] as f64]);
         }
     }
-    for l in &circuit.labels {
-        add([l.at[0] as f64, l.at[1] as f64], [l.at[0] as f64, l.at[1] as f64]);
+    if view == ModelView::Schematic {
+        for l in &circuit.labels {
+            add([l.at[0] as f64, l.at[1] as f64], [l.at[0] as f64, l.at[1] as f64]);
+        }
     }
     acc
 }
@@ -250,17 +261,23 @@ pub struct PinHit {
     pub part: usize,
     pub pin: String,
     pub at: Pt,
+    /// The pin is a hole of a board part.
+    pub board: bool,
 }
 
-pub fn pin_at(circuit: &Circuit, lib: &Library, w: [f64; 2], tol: f64) -> Option<PinHit> {
-    let mut best: Option<(f64, PinHit)> = None;
+/// The pin of a part placed in `view` closest to `w` within `tol`. At equal distance a pin of a
+/// real part beats a board hole (a leg sitting in a hole).
+pub fn pin_at(circuit: &Circuit, lib: &Library, view: ModelView, w: [f64; 2], tol: f64) -> Option<PinHit> {
+    let mut best: Option<((f64, bool), PinHit)> = None;
     for (i, part) in circuit.parts.iter().enumerate() {
-        let Some(def) = lib.get(&part.ty) else { continue };
-        for pin in &def.pins {
-            let at = pin_world(part, pin);
-            let d = ((at[0] as f64 - w[0]).powi(2) + (at[1] as f64 - w[1]).powi(2)).sqrt();
-            if d <= tol && best.as_ref().is_none_or(|(bd, _)| d < *bd) {
-                best = Some((d, PinHit { part: i, pin: pin.id.clone(), at }));
+        let (Some(pl), Some(def)) = (part.placement(view), lib.get(&part.ty)) else { continue };
+        let board = def.is_board();
+        for (pin, pos) in def.placed_pins(view) {
+            let at = pin_world(pl, pos);
+            let (dx, dy) = (at[0] as f64 - w[0], at[1] as f64 - w[1]);
+            let d = (dx * dx + dy * dy).sqrt();
+            if d <= tol && best.as_ref().is_none_or(|(k, _)| (d, board) < *k) {
+                best = Some(((d, board), PinHit { part: i, pin: pin.id.clone(), at, board }));
             }
         }
     }
@@ -274,10 +291,13 @@ fn dist_to_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     ((p[0] - (a[0] + t * dx)).powi(2) + (p[1] - (a[1] + t * dy)).powi(2)).sqrt()
 }
 
-/// Index of the wire closest to `w` within `tol`.
-pub fn wire_at(circuit: &Circuit, w: [f64; 2], tol: f64) -> Option<usize> {
+/// Index (into `circuit.wires`) of the wire of `view` closest to `w` within `tol`.
+pub fn wire_at(circuit: &Circuit, view: ModelView, w: [f64; 2], tol: f64) -> Option<usize> {
     let mut best: Option<(f64, usize)> = None;
     for (i, wire) in circuit.wires.iter().enumerate() {
+        if wire.view != view {
+            continue;
+        }
         for s in wire.pts.windows(2) {
             let d = dist_to_segment(w, [s[0][0] as f64, s[0][1] as f64], [s[1][0] as f64, s[1][1] as f64]);
             if d <= tol && best.is_none_or(|(bd, _)| d < bd) {
@@ -288,11 +308,12 @@ pub fn wire_at(circuit: &Circuit, w: [f64; 2], tol: f64) -> Option<usize> {
     best.map(|(_, i)| i)
 }
 
-/// Index of the smallest part whose box (grown by `tol`) contains `w`.
-pub fn part_at(circuit: &Circuit, lib: &Library, w: [f64; 2], tol: f64) -> Option<usize> {
+/// Index of the smallest part placed in `view` whose box (grown by `tol`) contains `w`.
+pub fn part_at(circuit: &Circuit, lib: &Library, view: ModelView, w: [f64; 2], tol: f64) -> Option<usize> {
     let mut best: Option<(f64, usize)> = None;
     for (i, part) in circuit.parts.iter().enumerate() {
-        let (lo, hi) = part_box(part, lib.get(&part.ty));
+        let Some(pl) = part.placement(view) else { continue };
+        let (lo, hi) = part_box(pl, lib.get(&part.ty), view);
         if w[0] >= lo[0] - tol && w[0] <= hi[0] + tol && w[1] >= lo[1] - tol && w[1] <= hi[1] + tol {
             let area = (hi[0] - lo[0]) * (hi[1] - lo[1]);
             if best.is_none_or(|(ba, _)| area < ba) {
@@ -303,13 +324,17 @@ pub fn part_at(circuit: &Circuit, lib: &Library, w: [f64; 2], tol: f64) -> Optio
     best.map(|(_, i)| i)
 }
 
-/// A representative world point for a list of ids (part origin or first wire point).
-pub fn locate_ids(circuit: &Circuit, ids: &[String]) -> Option<Pt> {
+/// A representative world point in `view` for a list of ids: a part id (its origin there), a
+/// `PART.PIN` reference (the part's origin), or a wire id (its first point). Ids of things that
+/// are not in `view` are skipped.
+pub fn locate_ids(circuit: &Circuit, ids: &[String], view: ModelView) -> Option<Pt> {
     for id in ids {
-        if let Some(p) = circuit.parts.iter().find(|p| &p.id == id) {
-            return Some(p.at);
+        let part_id = id.split_once('.').map_or(id.as_str(), |(p, _)| p);
+        let part = circuit.parts.iter().find(|p| p.id == *id).or_else(|| circuit.part(part_id));
+        if let Some(pl) = part.and_then(|p| p.placement(view)) {
+            return Some(pl.at);
         }
-        if let Some(w) = circuit.wires.iter().find(|w| &w.id == id) {
+        if let Some(w) = circuit.wires.iter().find(|w| &w.id == id && w.view == view) {
             if let Some(pt) = w.pts.first() {
                 return Some(*pt);
             }
@@ -411,7 +436,7 @@ fn stroke_of(width: f32, c: Option<Rgba>) -> Stroke {
 // Drawing
 // ---------------------------------------------------------------------------------------------
 
-/// What to emphasize this frame (hovered net).
+/// What to emphasize this frame (hovered or locked net).
 #[derive(Debug, Clone, Default)]
 pub struct Highlight {
     pub wires: Vec<String>,
@@ -419,29 +444,35 @@ pub struct Highlight {
     pub pins: Vec<(String, String)>,
 }
 
+impl Highlight {
+    pub fn is_empty(&self) -> bool {
+        self.wires.is_empty() && self.pins.is_empty()
+    }
+}
+
 pub struct DrawCtx<'a> {
     pub painter: &'a Painter,
     pub origin: Pos2,
-    pub view: View,
+    pub cam: Camera,
     pub theme: Theme,
     pub labels: LabelOpts,
 }
 
 impl DrawCtx<'_> {
     pub(crate) fn pt(&self, w: [f64; 2]) -> Pos2 {
-        self.view.to_screen(self.origin, w)
+        self.cam.to_screen(self.origin, w)
     }
 
     pub(crate) fn px(&self, units: f64) -> f32 {
-        units as f32 * self.view.scale
+        units as f32 * self.cam.scale
     }
 }
 
 /// Draw background grid dots: one per unit, stronger every ten.
 pub fn draw_grid(d: &DrawCtx, size: Vec2) {
-    let s = d.view.scale;
-    let lo = d.view.to_world(Vec2::ZERO);
-    let hi = d.view.to_world(size);
+    let s = d.cam.scale;
+    let lo = d.cam.to_world(Vec2::ZERO);
+    let hi = d.cam.to_world(size);
     let (x0, x1) = (lo[0].floor() as i64, hi[0].ceil() as i64);
     let (y0, y1) = (lo[1].floor() as i64, hi[1].ceil() as i64);
     let minor = s >= 8.0;
@@ -465,7 +496,8 @@ pub fn draw_grid(d: &DrawCtx, size: Vec2) {
     }
 }
 
-pub fn draw_circuit(
+/// Draw the schematic view of a circuit.
+pub fn draw_schematic(
     d: &DrawCtx,
     circuit: &Circuit,
     lib: &Library,
@@ -473,10 +505,11 @@ pub fn draw_circuit(
     hl: &Highlight,
     selected: Option<usize>,
 ) {
+    let view = ModelView::Schematic;
     let t = &d.theme;
     let pal = Palette::for_circuit(circuit, t.dark);
     // Wires
-    for w in &circuit.wires {
+    for w in circuit.wires_in(view) {
         let lit = hl.wires.iter().any(|x| x == &w.id);
         let color = if lit { Some(t.highlight) } else { color::wire_color(w, &pal).map(to_color32) };
         let Some(color) = color else { continue };
@@ -488,20 +521,20 @@ pub fn draw_circuit(
     }
     // Parts
     for (i, part) in circuit.parts.iter().enumerate() {
-        match lib.get(&part.ty) {
-            Some(def) => draw_part(d, &pal, part, def),
-            None => draw_unknown(d, part),
+        let Some(pl) = part.placement(view) else { continue };
+        match lib.get(&part.ty).and_then(|def| def.view(view)) {
+            Some(vd) => draw_shapes(d, &pal, part, pl, &vd.shapes),
+            None => draw_unknown(d, part, pl),
         }
         if selected == Some(i) {
-            let (lo, hi) = part_box(part, lib.get(&part.ty));
-            let r = Rect::from_min_max(d.pt([lo[0] - 0.4, lo[1] - 0.4]), d.pt([hi[0] + 0.4, hi[1] + 0.4]));
-            d.painter.rect_stroke(r, 3.0, Stroke::new(1.5, t.select), egui::StrokeKind::Outside);
+            let (lo, hi) = part_box(pl, lib.get(&part.ty), view);
+            draw_selection(d, lo, hi);
         }
     }
     // Junction dots
     let jr = d.px(0.28).max(2.5);
     // Without per-wire colours every junction takes the palette colour (skips a scan per dot).
-    let uniform = circuit.wires.iter().all(|w| w.color.is_none());
+    let uniform = circuit.wires_in(view).all(|w| w.color.is_none());
     for j in junctions {
         let c = match (uniform, pal.junction) {
             (_, Spec::Color(c)) => Some(c),
@@ -515,9 +548,9 @@ pub fn draw_circuit(
     }
     // Pin markers
     for part in &circuit.parts {
-        let Some(def) = lib.get(&part.ty) else { continue };
-        for pin in &def.pins {
-            let at = pin_world(part, pin);
+        let (Some(pl), Some(def)) = (part.placement(view), lib.get(&part.ty)) else { continue };
+        for (pin, pos) in def.placed_pins(view) {
+            let at = pin_world(pl, pos);
             let c = d.pt([at[0] as f64, at[1] as f64]);
             let lit = hl.pins.iter().any(|(p, n)| p == &part.id && n == &pin.id);
             if lit {
@@ -539,11 +572,17 @@ pub fn draw_circuit(
         let p = d.pt([l.at[0] as f64, l.at[1] as f64]);
         draw_text(d, p + Vec2::new(d.px(0.2), -d.px(0.2)), &l.name, 0.9, Anchor::Start, to_color32(c));
     }
-    labels::draw_overlay(d, circuit, lib);
+    labels::draw_overlay(d, circuit, lib, view);
 }
 
-fn draw_text(d: &DrawCtx, at: Pos2, text: &str, size_units: f64, anchor: Anchor, color: Color32) {
-    let Some(px) = labels::text_px(size_units, d.view.scale) else { return };
+/// Outline around the selected part's world box.
+pub fn draw_selection(d: &DrawCtx, lo: [f64; 2], hi: [f64; 2]) {
+    let r = Rect::from_min_max(d.pt([lo[0] - 0.4, lo[1] - 0.4]), d.pt([hi[0] + 0.4, hi[1] + 0.4]));
+    d.painter.rect_stroke(r, 3.0, Stroke::new(1.5, d.theme.select), egui::StrokeKind::Outside);
+}
+
+pub fn draw_text(d: &DrawCtx, at: Pos2, text: &str, size_units: f64, anchor: Anchor, color: Color32) {
+    let Some(px) = labels::text_px(size_units, d.cam.scale) else { return };
     if text.is_empty() {
         return;
     }
@@ -555,11 +594,11 @@ fn draw_text(d: &DrawCtx, at: Pos2, text: &str, size_units: f64, anchor: Anchor,
     d.painter.text(at + Vec2::new(0.0, px * 0.15), align, text, FontId::proportional(px), color);
 }
 
-fn draw_poly(d: &DrawCtx, pal: &Palette, part: &Part, pts: &[[f64; 2]], closed: bool, style: &Style) {
+fn draw_poly(d: &DrawCtx, pal: &Palette, part: &Part, pl: &Placement, pts: &[[f64; 2]], closed: bool, style: &Style) {
     if pts.len() < 2 {
         return;
     }
-    let sp: Vec<Pos2> = pts.iter().map(|p| d.pt(to_world(part, *p))).collect();
+    let sp: Vec<Pos2> = pts.iter().map(|p| d.pt(to_world(pl, *p))).collect();
     let width = d.px(style.width.unwrap_or(0.12)).max(1.0);
     let stroke = stroke_of(width, color::stroke_color(style, part, pal));
     let fill = if closed { color::fill_color(style, part).map(to_color32) } else { None };
@@ -572,14 +611,16 @@ fn draw_poly(d: &DrawCtx, pal: &Palette, part: &Part, pts: &[[f64; 2]], closed: 
     }
 }
 
-fn draw_part(d: &DrawCtx, pal: &Palette, part: &Part, def: &PartDef) {
-    for shape in &def.shapes {
+/// Draw the vector `shapes` of one view of a part placed with `pl` (schematic symbols, and the
+/// breadboard fallback for parts without artwork).
+pub fn draw_shapes(d: &DrawCtx, pal: &Palette, part: &Part, pl: &Placement, shapes: &[Sh]) {
+    for shape in shapes {
         match shape {
-            Sh::Line { pts, style } => draw_poly(d, pal, part, pts, false, style),
-            Sh::Poly { pts, style } => draw_poly(d, pal, part, pts, true, style),
-            Sh::Rect { at, size, r, style } => draw_poly(d, pal, part, &rect_outline(*at, *size, *r), true, style),
+            Sh::Line { pts, style } => draw_poly(d, pal, part, pl, pts, false, style),
+            Sh::Poly { pts, style } => draw_poly(d, pal, part, pl, pts, true, style),
+            Sh::Rect { at, size, r, style } => draw_poly(d, pal, part, pl, &rect_outline(*at, *size, *r), true, style),
             Sh::Circle { at, r, style } => {
-                let c = d.pt(to_world(part, *at));
+                let c = d.pt(to_world(pl, *at));
                 let width = d.px(style.width.unwrap_or(0.12)).max(1.0);
                 if let Some(fill) = color::fill_color(style, part) {
                     d.painter.add(Shape::circle_filled(c, d.px(*r), to_color32(fill)));
@@ -589,11 +630,11 @@ fn draw_part(d: &DrawCtx, pal: &Palette, part: &Part, def: &PartDef) {
             }
             Sh::Arc { at, r, from, to, style } => {
                 let step = (60.0 / (d.px(*r).max(1.0) as f64).sqrt()).clamp(3.0, 15.0);
-                draw_poly(d, pal, part, &arc_points(*at, *r, *from, *to, step), false, style);
+                draw_poly(d, pal, part, pl, &arc_points(*at, *r, *from, *to, step), false, style);
             }
             Sh::Text { at, text, size, anchor, style } => {
                 let Some(c) = color::text_color(style, part, pal) else { continue };
-                let p = d.pt(to_world(part, *at));
+                let p = d.pt(to_world(pl, *at));
                 let shown = expand_text_with(text, part, d.labels.refs, d.labels.values);
                 draw_text(d, p, &shown, *size, *anchor, to_color32(c));
             }
@@ -601,13 +642,14 @@ fn draw_part(d: &DrawCtx, pal: &Palette, part: &Part, def: &PartDef) {
     }
 }
 
-fn draw_unknown(d: &DrawCtx, part: &Part) {
-    let cs = corners(part, UNKNOWN_SIZE);
+/// Dashed red placeholder box with the type name: unknown type or no geometry in this view.
+pub fn draw_unknown(d: &DrawCtx, part: &Part, pl: &Placement) {
+    let cs = corners(pl, UNKNOWN_SIZE);
     let mut pts: Vec<Pos2> = cs.iter().map(|c| d.pt(*c)).collect();
     pts.push(pts[0]);
     let stroke = Stroke::new(1.5, d.theme.error);
     d.painter.extend(Shape::dashed_line(&pts, stroke, 6.0, 4.0));
-    let center = d.pt(to_world(part, [UNKNOWN_SIZE[0] / 2.0, UNKNOWN_SIZE[1] / 2.0]));
+    let center = d.pt(to_world(pl, [UNKNOWN_SIZE[0] / 2.0, UNKNOWN_SIZE[1] / 2.0]));
     let px = d.px(0.9).clamp(9.0, 40.0);
     d.painter.text(center, Align2::CENTER_CENTER, &part.ty, FontId::proportional(px), d.theme.error);
 }
@@ -647,31 +689,29 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn wire(id: &str, pts: &[Pt]) -> Wire {
-        Wire { id: id.into(), pts: pts.to_vec(), color: None }
+        Wire { id: id.into(), pts: pts.to_vec(), ..Wire::default() }
     }
 
     fn part_with(props: &[(&str, &str)]) -> Part {
         Part {
             id: "R1".into(),
             ty: "resistor".into(),
-            at: [0, 0],
-            rot: 0,
-            mirror: false,
+            schematic: Some(Placement::at(0, 0)),
             props: props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>(),
             ..Part::default()
         }
     }
 
     #[test]
-    fn view_roundtrip() {
-        let v = View { origin: Vec2::new(13.0, -7.0), scale: 25.0 };
+    fn camera_roundtrip() {
+        let v = Camera { origin: Vec2::new(13.0, -7.0), scale: 25.0 };
         let w = v.to_world(v.to_local([3.0, 4.5]));
         assert!((w[0] - 3.0).abs() < 1e-4 && (w[1] - 4.5).abs() < 1e-4);
     }
 
     #[test]
     fn zoom_keeps_cursor_fixed() {
-        let mut v = View::default();
+        let mut v = Camera::default();
         let cursor = Vec2::new(300.0, 200.0);
         let before = v.to_world(cursor);
         v.zoom_at(cursor, 1.7);
@@ -682,7 +722,7 @@ mod tests {
 
     #[test]
     fn zoom_is_clamped() {
-        let mut v = View::default();
+        let mut v = Camera::default();
         v.zoom_at(Vec2::ZERO, 1e6);
         assert_eq!(v.scale, MAX_SCALE);
         v.zoom_at(Vec2::ZERO, 1e-6);
@@ -691,7 +731,7 @@ mod tests {
 
     #[test]
     fn fit_contains_bounds() {
-        let mut v = View::default();
+        let mut v = Camera::default();
         let size = Vec2::new(800.0, 600.0);
         v.fit([10.0, 5.0], [30.0, 25.0], size, 20.0);
         for corner in [[10.0, 5.0], [30.0, 25.0]] {
@@ -704,7 +744,7 @@ mod tests {
 
     #[test]
     fn center_on_point() {
-        let mut v = View::default();
+        let mut v = Camera::default();
         v.center_on([7.0, 9.0], Vec2::new(400.0, 300.0));
         let p = v.to_local([7.0, 9.0]);
         assert!((p.x - 200.0).abs() < 0.01 && (p.y - 150.0).abs() < 0.01);
@@ -745,6 +785,18 @@ mod tests {
         // A polyline vertex (2) plus another wire's endpoint (1).
         let v = junctions(&[wire("a", &[[0, 0], [5, 0], [5, 5]]), wire("b", &[[5, 0], [9, 0]])]);
         assert_eq!(v, vec![[5, 0]]);
+    }
+
+    #[test]
+    fn breadboard_jumpers_make_no_junctions() {
+        let mut a = wire("a", &[[0, 0], [5, 0]]);
+        let mut b = wire("b", &[[5, 0], [5, 5]]);
+        let mut c = wire("c", &[[5, 0], [9, 0]]);
+        assert_eq!(junctions(&[a.clone(), b.clone(), c.clone()]), vec![[5, 0]]);
+        for w in [&mut a, &mut b, &mut c] {
+            w.view = ModelView::Breadboard;
+        }
+        assert!(junctions(&[a, b, c]).is_empty());
     }
 
     #[test]
@@ -804,26 +856,56 @@ mod tests {
     fn hit_testing_on_example() {
         let c = short_circ_core::parse_circuit(include_str!("../../../examples/led.circ")).unwrap();
         let lib = Library::load(&c, None);
+        let sch = ModelView::Schematic;
         // R1 at (14,6): pin a is local (0,1) -> world (14,7).
-        let h = pin_at(&c, &lib, [14.1, 7.1], 0.5).unwrap();
-        assert_eq!((c.parts[h.part].id.as_str(), h.pin.as_str()), ("R1", "a"));
-        assert!(pin_at(&c, &lib, [18.0, 3.0], 0.5).is_none());
-        assert_eq!(part_at(&c, &lib, [18.0, 7.0], 0.2), Some(1));
-        assert_eq!(wire_at(&c, [11.0, 8.5], 0.3), Some(0));
-        assert!(wire_at(&c, [40.0, 40.0], 0.3).is_none());
-        let (lo, hi) = circuit_bounds(&c, &lib).unwrap();
+        let h = pin_at(&c, &lib, sch, [14.1, 7.1], 0.5).unwrap();
+        assert_eq!((c.parts[h.part].id.as_str(), h.pin.as_str(), h.board), ("R1", "a", false));
+        assert!(pin_at(&c, &lib, sch, [18.0, 3.0], 0.5).is_none());
+        assert_eq!(part_at(&c, &lib, sch, [18.0, 7.0], 0.2), Some(1));
+        assert_eq!(wire_at(&c, sch, [11.0, 8.5], 0.3), Some(0));
+        assert!(wire_at(&c, sch, [40.0, 40.0], 0.3).is_none());
+        let (lo, hi) = circuit_bounds(&c, &lib, sch).unwrap();
         assert!(lo[0] <= 10.0 && hi[0] >= 26.0);
-        assert_eq!(locate_ids(&c, &["w2".into()]), Some([22, 7]));
-        assert_eq!(locate_ids(&c, &["R1".into()]), Some([14, 6]));
+        assert_eq!(locate_ids(&c, &["w2".into()], sch), Some([22, 7]));
+        assert_eq!(locate_ids(&c, &["R1".into()], sch), Some([14, 6]));
+        assert_eq!(locate_ids(&c, &["R1.a".into()], sch), Some([14, 6]), "PART.PIN refs find the part");
+        // Nothing of this v1 file is in the breadboard view.
+        let bb = ModelView::Breadboard;
+        assert!(pin_at(&c, &lib, bb, [14.1, 7.1], 0.5).is_none());
+        assert!(wire_at(&c, bb, [11.0, 8.5], 0.3).is_none());
+        assert!(part_at(&c, &lib, bb, [18.0, 7.0], 0.2).is_none());
+        assert!(circuit_bounds(&c, &lib, bb).is_none());
+        assert!(locate_ids(&c, &["R1".into()], bb).is_none());
+    }
+
+    #[test]
+    fn breadboard_hits_prefer_legs_over_holes_and_small_over_boards() {
+        let c = short_circ_core::parse_circuit(include_str!("../../../examples/breadboard_demo.circ")).unwrap();
+        let lib = Library::load(&c, None);
+        let bb = ModelView::Breadboard;
+        // R1 leg `a` sits in hole i10 of the board at (11,16).
+        let h = pin_at(&c, &lib, bb, [11.05, 16.0], 0.45).unwrap();
+        assert_eq!((c.parts[h.part].id.as_str(), h.pin.as_str(), h.board), ("R1", "a", false));
+        // An empty hole is a board pin.
+        let hole = pin_at(&c, &lib, bb, [5.0, 6.0], 0.45).unwrap();
+        assert!(hole.board && c.parts[hole.part].id == "BB1", "{hole:?}");
+        // On the resistor body the part wins over the big board.
+        let p = part_at(&c, &lib, bb, [13.0, 16.0], 0.3).unwrap();
+        assert_eq!(c.parts[p].id, "R1");
+        // Jumpers hit-test within the breadboard view only.
+        assert_eq!(c.wires[wire_at(&c, bb, [5.5, 23.3], 0.3).unwrap()].id, "j1");
+        assert!(wire_at(&c, ModelView::Schematic, [5.5, 23.3], 0.3).is_none());
     }
 
     #[test]
     fn unknown_part_has_box() {
-        let mut p = part_with(&[]);
-        p.at = [10, 10];
-        p.rot = 90;
-        let (lo, hi) = part_box(&p, None);
+        let pl = Placement { at: [10, 10], rot: 90, mirror: false };
+        let (lo, hi) = part_box(&pl, None, ModelView::Schematic);
         assert_eq!(lo, [8.0, 10.0]);
         assert_eq!(hi, [10.0, 16.0]);
+        // A type without geometry in the view gets the placeholder too.
+        let lib = Library::builtin();
+        let (lo2, hi2) = part_box(&pl, lib.get("breadboard_half"), ModelView::Schematic);
+        assert_eq!((lo2, hi2), (lo, hi));
     }
 }

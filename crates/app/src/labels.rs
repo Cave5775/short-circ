@@ -4,7 +4,7 @@
 use crate::canvas::DrawCtx;
 use eframe::egui::{Align2, Color32, FontId, Pos2};
 use short_circ_core::transform::{pin_world, to_world};
-use short_circ_core::{Circuit, Dir, Library, PartDef, PinDef, Pt};
+use short_circ_core::{Circuit, Dir, Library, PartDef, PinDef, Placement, Pt, View};
 
 /// Text smaller than this many pixels is not drawn at all (it would be an unreadable smudge).
 pub const MIN_TEXT_PX: f32 = 7.0;
@@ -45,15 +45,15 @@ pub fn pin_label_text(pin: &PinDef) -> String {
 
 /// Unit vector (in world axes) pointing from the pin into the part body, given the pin's
 /// declared outward direction and the part's rotation/mirror.
-pub fn inward_dir(part: &short_circ_core::Part, dir: Dir) -> [f64; 2] {
+pub fn inward_dir(pl: &Placement, dir: Dir) -> [f64; 2] {
     let out = match dir {
         Dir::Left => [-1.0, 0.0],
         Dir::Right => [1.0, 0.0],
         Dir::Up => [0.0, -1.0],
         Dir::Down => [0.0, 1.0],
     };
-    let o = to_world(part, [0.0, 0.0]);
-    let w = to_world(part, out);
+    let o = to_world(pl, [0.0, 0.0]);
+    let w = to_world(pl, out);
     [o[0] - w[0], o[1] - w[1]]
 }
 
@@ -91,15 +91,15 @@ pub fn wire_label_spot(pts: &[Pt]) -> Option<([f64; 2], bool)> {
     best.map(|(_, m, h)| (m, h))
 }
 
-fn paint_text(d: &DrawCtx, at: Pos2, align: Align2, text: &str, size_units: f64, color: Color32) {
-    let Some(px) = text_px(size_units, d.view.scale) else { return };
+pub(crate) fn paint_text(d: &DrawCtx, at: Pos2, align: Align2, text: &str, size_units: f64, color: Color32) {
+    let Some(px) = text_px(size_units, d.cam.scale) else { return };
     d.painter.text(at, align, text, FontId::proportional(px), color);
 }
 
-/// Paint wire ids and pin names when enabled. Cheap when both are off.
-pub fn draw_overlay(d: &DrawCtx, circuit: &Circuit, lib: &Library) {
-    if d.labels.wire_ids && text_px(WIRE_LABEL_SIZE, d.view.scale).is_some() {
-        for w in &circuit.wires {
+/// Paint wire ids and pin names of `view` when enabled. Cheap when both are off.
+pub fn draw_overlay(d: &DrawCtx, circuit: &Circuit, lib: &Library, view: View) {
+    if d.labels.wire_ids && text_px(WIRE_LABEL_SIZE, d.cam.scale).is_some() {
+        for w in circuit.wires_in(view) {
             let Some((mid, horizontal)) = wire_label_spot(&w.pts) else { continue };
             let p = d.pt(mid);
             let (at, align) = if horizontal {
@@ -110,18 +110,25 @@ pub fn draw_overlay(d: &DrawCtx, circuit: &Circuit, lib: &Library) {
             paint_text(d, at, align, &w.id, WIRE_LABEL_SIZE, d.theme.wire);
         }
     }
-    if d.labels.pin_names && text_px(PIN_LABEL_SIZE, d.view.scale).is_some() {
+    if d.labels.pin_names && text_px(PIN_LABEL_SIZE, d.cam.scale).is_some() {
         for part in &circuit.parts {
-            let Some(def) = lib.get(&part.ty) else { continue };
-            draw_pin_names(d, part, def);
+            let (Some(pl), Some(def)) = (part.placement(view), lib.get(&part.ty)) else { continue };
+            draw_pin_names(d, pl, def, view);
         }
     }
 }
 
-fn draw_pin_names(d: &DrawCtx, part: &short_circ_core::Part, def: &PartDef) {
-    for pin in &def.pins {
-        let at = pin_world(part, pin);
-        let (off, align) = pin_label_place(inward_dir(part, pin.dir));
+fn draw_pin_names(d: &DrawCtx, pl: &Placement, def: &PartDef, view: View) {
+    // Board holes are too many and too close together for labels.
+    if view == View::Breadboard && def.is_board() {
+        return;
+    }
+    for (pin, pos) in def.placed_pins(view) {
+        let at = pin_world(pl, pos);
+        let (off, align) = match view {
+            View::Schematic => pin_label_place(inward_dir(pl, pos.dir)),
+            View::Breadboard => ([0.3, -0.3], Align2::LEFT_BOTTOM),
+        };
         let p = d.pt([at[0] as f64 + off[0], at[1] as f64 + off[1]]);
         paint_text(d, p, align, &pin_label_text(pin), PIN_LABEL_SIZE, d.theme.pin);
     }
@@ -130,15 +137,13 @@ fn draw_pin_names(d: &DrawCtx, part: &short_circ_core::Part, def: &PartDef) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use short_circ_core::Part;
-    use std::collections::BTreeMap;
 
-    fn part(rot: i32, mirror: bool) -> Part {
-        Part { id: "U".into(), ty: "t".into(), at: [10, 10], rot, mirror, props: BTreeMap::new(), hidden_label: false, ..Part::default() }
+    fn part(rot: i32, mirror: bool) -> Placement {
+        Placement { at: [10, 10], rot, mirror }
     }
 
     fn pin(id: &str, name: Option<&str>) -> PinDef {
-        PinDef { id: id.into(), at: [0, 1], dir: Dir::Left, name: name.map(String::from) }
+        PinDef { id: id.into(), name: name.map(String::from) }
     }
 
     #[test]

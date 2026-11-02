@@ -14,3 +14,4 @@ short-circ-core = { path = "../core" }
 serde_json.workspace = true
 eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
 rfd = { version = "0.17.2", default-features = false }
+resvg = { version = "0.45", default-features = false }

@@ -1,8 +1,8 @@
-//! `--netlist FILE [--json]`: print the nets of a circuit so connectivity can be checked
-//! without looking at a picture.
+//! `--netlist FILE [--view V] [--json]`: print the nets of one view of a circuit so connectivity
+//! can be checked without looking at a picture.
 
 use crate::core_api;
-use short_circ_core::{Library, Net, Netlist};
+use short_circ_core::{Library, Net, Netlist, View};
 use std::cmp::Ordering;
 use std::path::Path;
 
@@ -85,7 +85,7 @@ pub fn netlist_json(nets: &[Net]) -> String {
 }
 
 /// Exit codes: 0 printed, 2 unreadable input.
-pub fn run(file: &Path, json: bool) -> i32 {
+pub fn run(file: &Path, json: bool, view: View) -> i32 {
     let circuit = match core_api::load_circuit(file) {
         Ok(c) => c,
         Err(msg) => {
@@ -94,7 +94,7 @@ pub fn run(file: &Path, json: bool) -> i32 {
         }
     };
     let lib = Library::load(&circuit, file.parent());
-    let nl = Netlist::build(&circuit, &lib);
+    let nl = Netlist::build(&circuit, &lib, view);
     if json {
         println!("{}", netlist_json(&nl.nets));
     } else {
@@ -110,7 +110,23 @@ mod tests {
     fn led() -> Netlist {
         let c = core_api::parse_circuit_text(include_str!("../../../examples/led.circ")).unwrap();
         let lib = Library::load(&c, None);
-        Netlist::build(&c, &lib)
+        Netlist::build(&c, &lib, View::Schematic)
+    }
+
+    #[test]
+    fn breadboard_view_lists_jumpers_and_strips() {
+        let c = core_api::parse_circuit_text(include_str!("../../../examples/breadboard_demo.circ")).unwrap();
+        let lib = Library::load(&c, None);
+        let nl = Netlist::build(&c, &lib, View::Breadboard);
+        let text = netlist_text(&nl.nets);
+        assert!(text.lines().any(|l| l.contains("wires: j1")), "{text}");
+        let v: serde_json::Value = serde_json::from_str(&netlist_json(&nl.nets)).unwrap();
+        let nets = v["nets"].as_array().unwrap();
+        // The battery plus lead and one jumper form a net with the battery pin first (natural order).
+        let pos = nets.iter().find(|n| n["wires"].as_array().unwrap().iter().any(|w| w == "j1")).unwrap();
+        assert!(pos["pins"].as_array().unwrap().iter().any(|p| p == "B1.pos"));
+        assert!(pos["pins"].as_array().unwrap().iter().any(|p| p == "R1.a"));
+        assert!(pos["name"].is_null(), "labels are not used in the breadboard view");
     }
 
     #[test]
@@ -164,7 +180,7 @@ mod tests {
 
     #[test]
     fn unreadable_file_exits_2() {
-        assert_eq!(run(Path::new("Z:/definitely/not/here.circ"), false), 2);
-        assert_eq!(run(Path::new("Z:/definitely/not/here.circ"), true), 2);
+        assert_eq!(run(Path::new("Z:/definitely/not/here.circ"), false, View::Schematic), 2);
+        assert_eq!(run(Path::new("Z:/definitely/not/here.circ"), true, View::Breadboard), 2);
     }
 }
