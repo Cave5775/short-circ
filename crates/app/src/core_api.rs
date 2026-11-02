@@ -59,6 +59,7 @@ impl Nets {
         self.wire_idx.get(wire).map(|&i| &self.nets[i])
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.nets.len()
     }
