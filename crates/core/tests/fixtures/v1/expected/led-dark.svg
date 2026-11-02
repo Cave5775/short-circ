@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="190" viewBox="8 -1 30 19" font-family="sans-serif">
+<title>Battery, resistor and LED loop</title>
+<rect x="8" y="-1" width="30" height="19" fill="#181a1e"/>
+<text class="title" x="10" y="3.3" font-size="1.4" font-weight="bold" fill="#dee0e4">Battery, resistor and LED loop</text>
+<g id="B1" class="part" data-type="battery">
+<polyline points="11,10 11,11.5" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="10,11.5 12,11.5" fill="none" stroke="#dee0e4" stroke-width="0.2" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="10.5,12.5 11.5,12.5" fill="none" stroke="#dee0e4" stroke-width="0.2" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="11,12.5 11,14" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="12.6" y="12.2" font-size="0.9" text-anchor="start" fill="#dee0e4">B1 9V</text>
+</g>
+<g id="R1" class="part" data-type="resistor">
+<polyline points="14,7 16,7" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="16" y="6" width="4" height="2" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="20,7 22,7" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="18" y="5.4" font-size="0.9" text-anchor="middle" fill="#dee0e4">R1</text>
+<text x="18" y="9.1" font-size="0.9" text-anchor="middle" fill="#dee0e4">330</text>
+</g>
+<g id="D1" class="part" data-type="led">
+<polyline points="25,6 25,7.5" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<polygon points="26,7.5 24,7.5 25,8.8" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="26,8.8 24,8.8" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="25,8.8 25,10" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="26.2,8 27.2,9" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="26.2,9 27.2,10" fill="none" stroke="#dee0e4" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="22.9" y="8.2" font-size="0.9" text-anchor="middle" fill="#dee0e4">D1</text>
+</g>
+<polyline id="w1" class="wire" points="11,10 11,7 14,7" fill="none" stroke="#56c878" stroke-width="0.15" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline id="w2" class="wire" points="22,7 25,7 25,6" fill="none" stroke="#56c878" stroke-width="0.15" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline id="w3" class="wire" points="25,10 25,16 11,16 11,14" fill="none" stroke="#56c878" stroke-width="0.15" stroke-linecap="round" stroke-linejoin="round"/>
+<circle class="pin" cx="11" cy="10" r="0.18" fill="#f0aa3c"/>
+<circle class="pin" cx="11" cy="14" r="0.18" fill="#f0aa3c"/>
+<circle class="pin" cx="14" cy="7" r="0.18" fill="#f0aa3c"/>
+<circle class="pin" cx="22" cy="7" r="0.18" fill="#f0aa3c"/>
+<circle class="pin" cx="25" cy="6" r="0.18" fill="#f0aa3c"/>
+<circle class="pin" cx="25" cy="10" r="0.18" fill="#f0aa3c"/>
+<text class="label" x="11.3" y="15.7" font-size="0.9" font-weight="bold" fill="#ffb86c">GND</text>
+</svg>

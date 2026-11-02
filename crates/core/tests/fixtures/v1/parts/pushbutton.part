@@ -1,0 +1,22 @@
+{
+  "format": "short-circ/1",
+  "type": "pushbutton",
+  "name": "Pushbutton",
+  "category": "electromechanical",
+  "size": [6, 3],
+  "pins": [
+    {"id": "a", "at": [0, 2], "dir": "left"},
+    {"id": "b", "at": [6, 2], "dir": "right"}
+  ],
+  "shapes": [
+    {"k": "line", "pts": [[0, 2], [1.5, 2]]},
+    {"k": "circle", "at": [1.5, 2], "r": 0.2},
+    {"k": "circle", "at": [4.5, 2], "r": 0.2},
+    {"k": "line", "pts": [[4.5, 2], [6, 2]]},
+    {"k": "line", "pts": [[1.5, 1.2], [4.5, 1.2]]},
+    {"k": "line", "pts": [[3, 1.2], [3, 0.4]]},
+    {"k": "line", "pts": [[2.2, 0.4], [3.8, 0.4]]},
+    {"k": "text", "at": [3, -0.3], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+    {"k": "text", "at": [3, 4.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+  ]
+}

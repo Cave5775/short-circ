@@ -1,0 +1,19 @@
+{
+  "format": "short-circ/1",
+  "type": "capacitor",
+  "name": "Capacitor",
+  "category": "passive",
+  "size": [4, 2],
+  "pins": [
+    {"id": "a", "at": [0, 1], "dir": "left"},
+    {"id": "b", "at": [4, 1], "dir": "right"}
+  ],
+  "shapes": [
+    {"k": "line", "pts": [[0, 1], [1.7, 1]]},
+    {"k": "line", "pts": [[1.7, 0], [1.7, 2]], "width": 0.2},
+    {"k": "line", "pts": [[2.3, 0], [2.3, 2]], "width": 0.2},
+    {"k": "line", "pts": [[2.3, 1], [4, 1]]},
+    {"k": "text", "at": [2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+    {"k": "text", "at": [2, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+  ]
+}

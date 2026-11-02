@@ -1,13 +1,19 @@
-//! Connectivity extraction, per docs/FORMAT.md "Connectivity rules".
+//! Connectivity extraction, per docs/FORMAT.md "Connectivity rules". One netlist per view.
 //!
 //! Every pin and every wire (a whole polyline is one conductor) is a node in a union-find.
-//! Nodes are joined when they meet at an integer point (pin/vertex/endpoint coincidence),
-//! when a wire vertex lies on another wire's segment (T-junction), and through labels of the
-//! same name. Two wires that merely cross (no vertex of either at the crossing) stay apart,
-//! and a pin in the interior of a segment without a vertex there is not connected either.
+//!
+//! Schematic: nodes are joined when they meet at an integer point (pin/vertex/endpoint
+//! coincidence), when a wire vertex lies on another wire's segment (T-junction), through labels
+//! of the same name and through part buses. Two wires that merely cross (no vertex of either at
+//! the crossing) stay apart, and a pin in the interior of a segment without a vertex there is
+//! not connected either.
+//!
+//! Breadboard: a wire is a flexible jumper that joins only at its two end points. Everything at
+//! the same grid point is one node (pins of any parts, wire end points); interior vertices
+//! connect nothing, wires never T-connect, labels are not used. Part buses (breadboard strips)
+//! join their holes.
 
-use crate::model::{Circuit, Pt};
-use crate::resolve::Library;
+use crate::model::{Circuit, PartLookup, Pt, View};
 use crate::transform::pin_world;
 use std::collections::HashMap;
 
@@ -24,7 +30,7 @@ pub struct PinRef {
 #[derive(Debug, Clone)]
 pub struct Net {
     pub id: usize,
-    /// Name from the first label (in file order) attached to this net.
+    /// Name from the first label (in file order) attached to this net. Schematic only.
     pub name: Option<String>,
     pub pins: Vec<PinRef>,
     /// Wire ids in file order.
@@ -40,7 +46,7 @@ pub(crate) enum Occ {
     Vertex(usize, usize),
 }
 
-/// One non-degenerate wire segment.
+/// One non-degenerate wire segment (schematic only).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Seg {
     pub wire: usize,
@@ -50,13 +56,22 @@ pub(crate) struct Seg {
     pub b: Pt,
 }
 
-/// Geometry shared by the netlist builder and the validator.
+/// Geometry of one view, shared by the netlist builder and the validator.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Geom {
     pub pins: Vec<PinRef>,
+    /// Per pin: the part is a board (breadboard-like carrier).
+    pub pin_board: Vec<bool>,
+    /// Per pin: the pin belongs to a bus of two or more pins of its part.
+    pub pin_in_bus: Vec<bool>,
+    /// Groups of pin indexes (placed pins of one part) that form one node.
+    pub buses: Vec<Vec<usize>>,
+    /// Ids of the wires drawn in this view, in file order.
     pub wire_ids: Vec<String>,
     pub wire_pts: Vec<Vec<Pt>>,
+    /// Schematic: every vertex. Breadboard: only the two end points of each wire.
     pub pt_map: HashMap<Pt, Vec<Occ>>,
+    /// Schematic only; empty in the breadboard view.
     pub segs: Vec<Seg>,
     grid: HashMap<(i32, i32), Vec<u32>>,
 }
@@ -121,32 +136,61 @@ fn seg_cells(a: Pt, b: Pt, mut f: impl FnMut(i32, i32)) {
 }
 
 impl Geom {
-    pub fn new(circuit: &Circuit, lib: &Library) -> Geom {
+    pub fn new(circuit: &Circuit, lib: &dyn PartLookup, view: View) -> Geom {
         let mut g = Geom::default();
         for part in &circuit.parts {
+            let Some(pl) = part.placement(view) else { continue };
             let Some(def) = lib.get(&part.ty) else { continue };
-            for pin in &def.pins {
-                let at = pin_world(part, pin);
+            let board = def.is_board();
+            let mut index: HashMap<&str, usize> = HashMap::new();
+            for (pin, pos) in def.placed_pins(view) {
+                let at = pin_world(pl, pos);
                 let idx = g.pins.len();
                 g.pins.push(PinRef { part: part.id.clone(), pin: pin.id.clone(), at });
+                g.pin_board.push(board);
+                g.pin_in_bus.push(false);
                 g.pt_map.entry(at).or_default().push(Occ::Pin(idx));
+                index.entry(pin.id.as_str()).or_insert(idx);
             }
-        }
-        for (wi, w) in circuit.wires.iter().enumerate() {
-            g.wire_ids.push(w.id.clone());
-            g.wire_pts.push(w.pts.clone());
-            for (vi, p) in w.pts.iter().enumerate() {
-                g.pt_map.entry(*p).or_default().push(Occ::Vertex(wi, vi));
-            }
-            for (si, pair) in w.pts.windows(2).enumerate() {
-                let (a, b) = (pair[0], pair[1]);
-                if a == b {
+            for bus in &def.buses {
+                let mut ids: Vec<&str> = bus.iter().map(String::as_str).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                if ids.len() < 2 {
                     continue;
                 }
-                let id = g.segs.len() as u32;
-                g.segs.push(Seg { wire: wi, idx: si, a, b });
-                let grid = &mut g.grid;
-                seg_cells(a, b, |cx, cy| grid.entry((cx, cy)).or_default().push(id));
+                let members: Vec<usize> = ids.iter().filter_map(|id| index.get(id).copied()).collect();
+                for &m in &members {
+                    g.pin_in_bus[m] = true;
+                }
+                if members.len() >= 2 {
+                    g.buses.push(members);
+                }
+            }
+        }
+        let schematic = view == View::Schematic;
+        for (wi, w) in circuit.wires_in(view).enumerate() {
+            g.wire_ids.push(w.id.clone());
+            g.wire_pts.push(w.pts.clone());
+            if schematic {
+                for (vi, p) in w.pts.iter().enumerate() {
+                    g.pt_map.entry(*p).or_default().push(Occ::Vertex(wi, vi));
+                }
+                for (si, pair) in w.pts.windows(2).enumerate() {
+                    let (a, b) = (pair[0], pair[1]);
+                    if a == b {
+                        continue;
+                    }
+                    let id = g.segs.len() as u32;
+                    g.segs.push(Seg { wire: wi, idx: si, a, b });
+                    let grid = &mut g.grid;
+                    seg_cells(a, b, |cx, cy| grid.entry((cx, cy)).or_default().push(id));
+                }
+            } else if let (Some(first), Some(last)) = (w.pts.first(), w.pts.last()) {
+                g.pt_map.entry(*first).or_default().push(Occ::Vertex(wi, 0));
+                if w.pts.len() > 1 {
+                    g.pt_map.entry(*last).or_default().push(Occ::Vertex(wi, w.pts.len() - 1));
+                }
             }
         }
         g
@@ -210,10 +254,13 @@ impl Dsu {
 
 #[derive(Debug, Clone)]
 pub struct Netlist {
+    /// The view this netlist describes.
+    pub view: View,
     /// Nets ordered by first appearance (pins in part order, then wires).
     pub nets: Vec<Net>,
     /// Per net id: every attached label as `(name, position)` in file order.
     /// More than one distinct name means two labels were joined (see `net-short`).
+    /// Always empty in the breadboard view.
     pub labels: Vec<Vec<(String, Pt)>>,
     pin_net: HashMap<(String, String), usize>,
     wire_net: HashMap<String, usize>,
@@ -223,50 +270,60 @@ pub struct Netlist {
 }
 
 impl Netlist {
-    pub fn build(circuit: &Circuit, lib: &Library) -> Netlist {
-        let geom = Geom::new(circuit, lib);
+    pub fn build(circuit: &Circuit, lib: &dyn PartLookup, view: View) -> Netlist {
+        let geom = Geom::new(circuit, lib, view);
         let np = geom.pins.len();
         let nw = geom.wire_ids.len();
         let mut dsu = Dsu((0..np + nw).collect());
+        let schematic = view == View::Schematic;
 
-        // Rules 1, 2, 4: everything at the same integer point is joined.
+        // Everything at the same integer point is joined (schematic: pins and every vertex;
+        // breadboard: pins and wire end points).
         for occs in geom.pt_map.values() {
             let first = geom.node(occs[0]);
             for o in &occs[1..] {
                 dsu.union(first, geom.node(*o));
             }
         }
-        // Rules 1, 2: a wire vertex lying on another wire's segment (T-junction).
-        // Crossings in segment interiors are deliberately not joined (rule 3).
-        for (wi, pts) in geom.wire_pts.iter().enumerate() {
-            for v in pts {
-                for &si in geom.near(*v) {
-                    let s = &geom.segs[si as usize];
-                    if s.wire != wi && on_segment(s.a, s.b, *v) {
-                        dsu.union(np + wi, np + s.wire);
+        // Part buses: pins of one part listed together are one node.
+        for bus in &geom.buses {
+            for &m in &bus[1..] {
+                dsu.union(bus[0], m);
+            }
+        }
+        let mut label_node: Vec<Option<usize>> = Vec::new();
+        if schematic {
+            // A wire vertex lying on another wire's segment (T-junction).
+            // Crossings in segment interiors are deliberately not joined.
+            for (wi, pts) in geom.wire_pts.iter().enumerate() {
+                for v in pts {
+                    for &si in geom.near(*v) {
+                        let s = &geom.segs[si as usize];
+                        if s.wire != wi && on_segment(s.a, s.b, *v) {
+                            dsu.union(np + wi, np + s.wire);
+                        }
                     }
                 }
             }
-        }
-        // Rule 5: labels. A label attaches to everything at its point, and same-name labels merge.
-        let mut anchors: HashMap<&str, usize> = HashMap::new();
-        let mut label_node: Vec<Option<usize>> = Vec::with_capacity(circuit.labels.len());
-        for l in &circuit.labels {
-            let attached = geom.nodes_at(l.at);
-            let Some(&first) = attached.first() else {
-                label_node.push(None);
-                continue;
-            };
-            for &n in &attached[1..] {
-                dsu.union(first, n);
-            }
-            match anchors.get(l.name.as_str()) {
-                Some(&a) => dsu.union(a, first),
-                None => {
-                    anchors.insert(l.name.as_str(), first);
+            // Labels attach to everything at their point, and same-name labels merge.
+            let mut anchors: HashMap<&str, usize> = HashMap::new();
+            for l in &circuit.labels {
+                let attached = geom.nodes_at(l.at);
+                let Some(&first) = attached.first() else {
+                    label_node.push(None);
+                    continue;
+                };
+                for &n in &attached[1..] {
+                    dsu.union(first, n);
                 }
+                match anchors.get(l.name.as_str()) {
+                    Some(&a) => dsu.union(a, first),
+                    None => {
+                        anchors.insert(l.name.as_str(), first);
+                    }
+                }
+                label_node.push(Some(first));
             }
-            label_node.push(Some(first));
         }
 
         // Number the nets by first appearance.
@@ -306,6 +363,7 @@ impl Netlist {
             wire_net.entry(id.clone()).or_insert(node_net[np + i]);
         }
         Netlist {
+            view,
             nets,
             labels,
             pin_net,
@@ -324,7 +382,8 @@ impl Netlist {
         self.wire_net.get(wire_id).copied()
     }
 
-    /// Net at a point: a pin position, a wire vertex, or a point on a wire segment.
+    /// Net at a point: a pin position, a wire vertex (breadboard: a wire end point), or a point
+    /// on a wire segment (schematic only).
     pub fn net_at(&self, p: Pt) -> Option<usize> {
         if let Some(o) = self.geom.pt_map.get(&p).and_then(|v| v.first()) {
             return Some(match *o {
@@ -344,12 +403,16 @@ impl Netlist {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse_circuit;
+    use crate::{parse_circuit, Library};
 
     fn build(src: &str) -> Netlist {
+        build_view(src, View::Schematic)
+    }
+
+    fn build_view(src: &str, view: View) -> Netlist {
         let c = parse_circuit(src).unwrap();
         let lib = Library::load(&c, None);
-        Netlist::build(&c, &lib)
+        Netlist::build(&c, &lib, view)
     }
 
     const HEAD: &str = r#""format":"short-circ/1""#;
@@ -479,12 +542,126 @@ mod tests {
     #[test]
     fn led_example_is_one_loop() {
         let c = parse_circuit(include_str!("../../../examples/led.circ")).unwrap();
-        let n = Netlist::build(&c, &Library::load(&c, None));
+        let n = Netlist::build(&c, &Library::load(&c, None), View::Schematic);
         // B1.pos-R1.a, R1.b-D1.anode, D1.cathode-B1.neg: three nets, each two pins.
         assert_eq!(n.nets.len(), 3);
         assert!(n.nets.iter().all(|net| net.pins.len() == 2));
         assert_eq!(n.net_of_pin("B1", "neg"), n.net_of_pin("D1", "cathode"));
         let gnd = n.net_of_pin("B1", "neg").unwrap();
         assert_eq!(n.nets[gnd].name.as_deref(), Some("GND"));
+    }
+
+    // ---- views -------------------------------------------------------------------------
+
+    const V2: &str = r#""format":"short-circ/2""#;
+
+    #[test]
+    fn parts_only_appear_in_views_they_are_placed_in() {
+        let src = format!(
+            r#"{{{V2},"lib":[{{"type":"sym","pins":[{{"id":"a"}}],
+              "schematic":{{"size":[1,1],"pins":{{"a":{{"at":[0,0]}}}},"shapes":[{{"k":"circle","at":[0,0],"r":0.3}}]}}}}],
+            "parts":[{{"id":"R1","type":"sym","schematic":{{"at":[0,0]}}}},
+            {{"id":"R2","type":"sym","breadboard":{{"at":[0,0]}}}}]}}"#
+        );
+        // `sym` has no breadboard geometry, so R2 contributes no pins there.
+        let s = build_view(&src, View::Schematic);
+        assert_eq!(s.net_of_pin("R1", "a").map(|_| ()), Some(()));
+        assert_eq!(s.net_of_pin("R2", "a"), None);
+        let b = build_view(&src, View::Breadboard);
+        assert!(b.nets.is_empty());
+    }
+
+    #[test]
+    fn wires_belong_to_their_view() {
+        let src = format!(
+            r#"{{{V2},"wires":[{{"id":"s","pts":[[0,0],[5,0]]}},{{"id":"b","view":"breadboard","pts":[[0,0],[5,5]]}}]}}"#
+        );
+        let s = build_view(&src, View::Schematic);
+        assert_eq!(s.nets.len(), 1);
+        assert_eq!(s.net_of_wire("s"), Some(0));
+        assert_eq!(s.net_of_wire("b"), None);
+        let b = build_view(&src, View::Breadboard);
+        assert_eq!(b.net_of_wire("b"), Some(0));
+        assert_eq!(b.net_of_wire("s"), None);
+    }
+
+    /// Two-pin breadboard-only parts: a "board" with a two-hole strip and two loose legs.
+    const BB_LIB: &str = r#""lib":[
+        {"type":"strip","category":"board","pins":[{"id":"h1"},{"id":"h2"},{"id":"h3"}],"buses":[["h1","h2"]],
+         "breadboard":{"size":[3,1],"pins":{"h1":{"at":[0,0]},"h2":{"at":[1,0]},"h3":{"at":[2,0]}},
+         "shapes":[{"k":"rect","at":[0,0],"size":[3,1]}]}},
+        {"type":"leg","pins":[{"id":"a"}],"breadboard":{"size":[1,1],"pins":{"a":{"at":[0,0]}},
+         "shapes":[{"k":"circle","at":[0,0],"r":0.3}]}}]"#;
+
+    #[test]
+    fn breadboard_wires_join_only_at_end_points() {
+        let n = build_view(
+            &format!(
+                r#"{{{V2},{BB_LIB},"parts":[
+                {{"id":"B1","type":"strip","breadboard":{{"at":[0,0]}}}},
+                {{"id":"L1","type":"leg","breadboard":{{"at":[1,0]}}}},
+                {{"id":"L2","type":"leg","breadboard":{{"at":[2,0]}}}},
+                {{"id":"L3","type":"leg","breadboard":{{"at":[5,5]}}}}],
+                "wires":[
+                  {{"id":"j1","view":"breadboard","pts":[[0,0],[0,3],[5,5]]}},
+                  {{"id":"j2","view":"breadboard","pts":[[3,-3],[3,3]]}},
+                  {{"id":"j3","view":"breadboard","pts":[[-3,0],[3,0]]}}]}}"#
+            ),
+            View::Breadboard,
+        );
+        // Strip bus h1-h2 joins L1 (at h2) with j1's first end (h1); j1 reaches L3.
+        assert_eq!(n.net_of_pin("L1", "a"), n.net_of_pin("B1", "h1"));
+        assert_eq!(n.net_of_pin("L1", "a"), n.net_of_pin("L3", "a"));
+        assert_eq!(n.net_of_wire("j1"), n.net_of_pin("L3", "a"));
+        // L2 sits on h3, which is not in the strip.
+        assert_ne!(n.net_of_pin("L2", "a"), n.net_of_pin("L1", "a"));
+        assert_eq!(n.net_of_pin("L2", "a"), n.net_of_pin("B1", "h3"));
+        // j3 passes over (0,0) and (1,0) with its interior and ends at (3,0), and j2 crosses it at
+        // (3,0) with its interior: neither joins anything (no T-junctions).
+        assert_ne!(n.net_of_wire("j3"), n.net_of_pin("B1", "h1"));
+        assert_ne!(n.net_of_wire("j2"), n.net_of_wire("j3"));
+    }
+
+    #[test]
+    fn breadboard_interior_vertices_connect_nothing_and_labels_are_ignored() {
+        let n = build_view(
+            &format!(
+                r#"{{{V2},{BB_LIB},"parts":[
+                {{"id":"L1","type":"leg","breadboard":{{"at":[1,0]}}}},
+                {{"id":"L2","type":"leg","breadboard":{{"at":[2,0]}}}}],
+                "wires":[{{"id":"j1","view":"breadboard","pts":[[0,0],[1,0],[2,0],[2,5]]}}],
+                "labels":[{{"at":[1,0],"name":"A"}},{{"at":[2,0],"name":"A"}}]}}"#
+            ),
+            View::Breadboard,
+        );
+        assert_ne!(n.net_of_pin("L1", "a"), n.net_of_pin("L2", "a"), "vertices at the legs do not connect");
+        assert_ne!(n.net_of_wire("j1"), n.net_of_pin("L1", "a"));
+        assert!(n.nets.iter().all(|net| net.name.is_none()), "labels are not used in the breadboard view");
+        assert!(n.labels.iter().all(|l| l.is_empty()));
+    }
+
+    #[test]
+    fn breadboard_pins_at_one_point_are_one_node() {
+        let n = build_view(
+            &format!(
+                r#"{{{V2},{BB_LIB},"parts":[
+                {{"id":"L1","type":"leg","breadboard":{{"at":[1,0]}}}},
+                {{"id":"L2","type":"leg","breadboard":{{"at":[1,0]}}}}]}}"#
+            ),
+            View::Breadboard,
+        );
+        assert_eq!(n.net_of_pin("L1", "a"), n.net_of_pin("L2", "a"));
+        assert_eq!(n.nets.len(), 1);
+    }
+
+    #[test]
+    fn schematic_buses_join_pins_of_one_part() {
+        let n = build(&format!(
+            r#"{{{V2},"lib":[{{"type":"link","pins":[{{"id":"a"}},{{"id":"b"}}],"buses":[["a","b"]],
+              "schematic":{{"size":[4,1],"pins":{{"a":{{"at":[0,0]}},"b":{{"at":[4,0]}}}},"shapes":[{{"k":"line","pts":[[0,0],[4,0]]}}]}}}}],
+            "parts":[{{"id":"K1","type":"link","schematic":{{"at":[0,0]}}}}]}}"#
+        ));
+        assert_eq!(n.net_of_pin("K1", "a"), n.net_of_pin("K1", "b"));
+        assert_eq!(n.nets.len(), 1);
     }
 }

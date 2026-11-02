@@ -1,0 +1,15 @@
+{
+  "format": "short-circ/1",
+  "title": "Deliberately broken: overlapping wires, crossing, dangling end, overlapping parts",
+  "parts": [
+    {"id": "R1", "type": "resistor", "at": [5, 5]},
+    {"id": "R2", "type": "resistor", "at": [8, 5]}
+  ],
+  "wires": [
+    {"id": "w1", "pts": [[0, 6], [5, 6]]},
+    {"id": "w2", "pts": [[3, 6], [10, 6]]},
+    {"id": "w3", "pts": [[20, 0], [20, 10]]},
+    {"id": "w4", "pts": [[15, 5], [25, 5]]},
+    {"id": "w5", "pts": [[30, 30], [34, 30]]}
+  ]
+}

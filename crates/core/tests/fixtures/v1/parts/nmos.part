@@ -1,0 +1,25 @@
+{
+  "format": "short-circ/1",
+  "type": "nmos",
+  "name": "N-channel MOSFET",
+  "category": "semiconductor",
+  "size": [5, 6],
+  "pins": [
+    {"id": "gate", "at": [0, 3], "dir": "left"},
+    {"id": "drain", "at": [4, 0], "dir": "up"},
+    {"id": "source", "at": [4, 6], "dir": "down"}
+  ],
+  "shapes": [
+    {"k": "line", "pts": [[0, 3], [1.5, 3]]},
+    {"k": "line", "pts": [[1.5, 1.3], [1.5, 4.7]], "width": 0.2},
+    {"k": "line", "pts": [[2.2, 1.3], [2.2, 2.2]], "width": 0.2},
+    {"k": "line", "pts": [[2.2, 2.6], [2.2, 3.4]], "width": 0.2},
+    {"k": "line", "pts": [[2.2, 3.8], [2.2, 4.7]], "width": 0.2},
+    {"k": "line", "pts": [[4, 0], [4, 1.5], [2.2, 1.5]]},
+    {"k": "line", "pts": [[4, 6], [4, 4.5], [2.2, 4.5]]},
+    {"k": "line", "pts": [[4, 4.5], [4, 3], [2.2, 3]]},
+    {"k": "poly", "pts": [[2.2, 3], [3, 2.6], [3, 3.4]]},
+    {"k": "text", "at": [4.8, 2.4], "text": "{ref}", "size": 0.9, "anchor": "start"},
+    {"k": "text", "at": [4.8, 3.6], "text": "{value}", "size": 0.9, "anchor": "start"}
+  ]
+}

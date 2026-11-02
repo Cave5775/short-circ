@@ -16,7 +16,7 @@
 //! `"none"` stops the search and means "draw nothing". Explicit colours are never adjusted for
 //! the dark theme.
 
-use crate::model::{Circuit, Label, Part, Style, Theme, Wire};
+use crate::model::{Circuit, Label, Part, Style, Theme, View, Wire};
 
 /// 8 bit RGBA, straight (non-premultiplied) alpha.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -231,8 +231,9 @@ pub fn text_color(style: &Style, part: &Part, pal: &Palette) -> Option<Rgba> {
     resolve(&[not_none(&style.fill), not_none(&style.stroke), part.label_color.as_deref()], pal.part)
 }
 
-/// Colour of the junction dot at `at`: `theme.junction` if set, else the colour of the first wire
-/// (file order) that touches the point, else the palette wire colour.
+/// Colour of the junction dot at `at`: `theme.junction` if set, else the colour of the first
+/// schematic wire (file order) that touches the point, else the palette wire colour. Junction
+/// dots exist in the schematic only, so breadboard jumpers are not considered.
 pub fn junction_color(circuit: &Circuit, at: [i32; 2], pal: &Palette) -> Option<Rgba> {
     match pal.junction {
         Spec::Color(c) => return Some(c),
@@ -240,7 +241,7 @@ pub fn junction_color(circuit: &Circuit, at: [i32; 2], pal: &Palette) -> Option<
         Spec::Unset => {}
     }
     let mut touched = false;
-    for w in &circuit.wires {
+    for w in circuit.wires_in(View::Schematic) {
         if wire_touches(w, at) {
             touched = true;
             if let Some(c) = wire_color(w, pal) {

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="730" height="370" viewBox="-2 -5 73 37" font-family="sans-serif">
+<title>Deliberately broken: overlapping wires, crossing, dangling end, overlapping parts</title>
+<rect x="-2" y="-5" width="73" height="37" fill="#fafaf7"/>
+<text class="title" x="0" y="-1.2" font-size="1.4" font-weight="bold" fill="#1e2024">Deliberately broken: overlapping wires, crossing, dangling end, overlapping parts</text>
+<g id="R1" class="part" data-type="resistor">
+<polyline points="5,6 7,6" fill="none" stroke="#1e2024" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="7" y="5" width="4" height="2" fill="none" stroke="#1e2024" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="11,6 13,6" fill="none" stroke="#1e2024" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="9" y="4.4" font-size="0.9" text-anchor="middle" fill="#1e2024">R1</text>
+</g>
+<g id="R2" class="part" data-type="resistor">
+<polyline points="8,6 10,6" fill="none" stroke="#1e2024" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="10" y="5" width="4" height="2" fill="none" stroke="#1e2024" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline points="14,6 16,6" fill="none" stroke="#1e2024" stroke-width="0.12" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="12" y="4.4" font-size="0.9" text-anchor="middle" fill="#1e2024">R2</text>
+</g>
+<polyline id="w1" class="wire" points="0,6 5,6" fill="none" stroke="#14823c" stroke-width="0.15" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline id="w2" class="wire" points="3,6 10,6" fill="none" stroke="#14823c" stroke-width="0.15" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline id="w3" class="wire" points="20,0 20,10" fill="none" stroke="#14823c" stroke-width="0.15" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline id="w4" class="wire" points="15,5 25,5" fill="none" stroke="#14823c" stroke-width="0.15" stroke-linecap="round" stroke-linejoin="round"/>
+<polyline id="w5" class="wire" points="30,30 34,30" fill="none" stroke="#14823c" stroke-width="0.15" stroke-linecap="round" stroke-linejoin="round"/>
+<circle class="junction" cx="3" cy="6" r="0.3" fill="#14823c"/>
+<circle class="junction" cx="5" cy="6" r="0.3" fill="#14823c"/>
+<circle class="pin" cx="5" cy="6" r="0.18" fill="#c86e00"/>
+<circle class="pin" cx="13" cy="6" r="0.18" fill="#c86e00"/>
+<circle class="pin" cx="8" cy="6" r="0.18" fill="#c86e00"/>
+<circle class="pin" cx="16" cy="6" r="0.18" fill="#c86e00"/>
+</svg>

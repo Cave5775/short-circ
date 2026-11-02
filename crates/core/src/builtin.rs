@@ -1,7 +1,9 @@
 //! Built-in components embedded in the executable: one `include_str!` per file in /parts,
 //! plus the parametric families `dipN` and `headerN` produced by [`generate`].
+//! Embedded files may be `short-circ/1` or `short-circ/2`; both load through `migrate`.
 
-use crate::model::{Anchor, Dir, PartDef, PinDef, Shape, Style, FORMAT};
+use crate::model::{Anchor, Dir, PartDef, PinDef, PinPos, Shape, Style, ViewDef, FORMAT};
+use std::collections::BTreeMap;
 
 pub const BUILTIN: &[(&str, &str)] = &[
     ("resistor", include_str!("../../../parts/resistor.part")),
@@ -30,6 +32,7 @@ pub const BUILTIN: &[(&str, &str)] = &[
 ];
 
 /// Parametric families by type name, e.g. "dip8", "header4". Returns None if `ty` is not one.
+/// Generated parts have logical pins and a schematic view only.
 ///
 /// `dipN` (N even, 4..=40): two columns of N/2 pins each on a 2-unit pitch, columns 6 units
 /// apart (x = 0 and x = 6). Pin ids "1".."N" are numbered anticlockwise as seen on a real
@@ -72,20 +75,23 @@ fn text(at: [f64; 2], t: &str, anchor: Anchor) -> Shape {
     Shape::Text { at, text: t.to_string(), size: 0.9, anchor, style: Style::default() }
 }
 
-fn pin(id: i32, at: [i32; 2], dir: Dir) -> PinDef {
-    PinDef { id: id.to_string(), at, dir, name: None }
+/// Adds the logical pin and its schematic position.
+fn pin(pins: &mut Vec<PinDef>, view: &mut BTreeMap<String, PinPos>, id: i32, at: [i32; 2], dir: Dir) {
+    pins.push(PinDef { id: id.to_string(), name: None });
+    view.insert(id.to_string(), PinPos { at, dir });
 }
 
 fn dip(n: i32) -> PartDef {
     let half = n / 2;
     let mut pins = Vec::new();
+    let mut pos = BTreeMap::new();
     let mut shapes = Vec::new();
     for k in 1..=half {
         let y = 2 * k - 1;
-        pins.push(pin(k, [0, y], Dir::Left));
+        pin(&mut pins, &mut pos, k, [0, y], Dir::Left);
         shapes.push(line(&[[0.0, y as f64], [1.0, y as f64]]));
         let y2 = 2 * half - 2 * k + 1;
-        pins.push(pin(half + k, [6, y2], Dir::Right));
+        pin(&mut pins, &mut pos, half + k, [6, y2], Dir::Right);
         shapes.push(line(&[[5.0, y2 as f64], [6.0, y2 as f64]]));
     }
     shapes.push(Shape::Rect { at: [1.0, 0.0], size: [4.0, n as f64], r: 0.0, style: Style::default() });
@@ -98,17 +104,18 @@ fn dip(n: i32) -> PartDef {
         ty: format!("dip{n}"),
         name: format!("DIP-{n}"),
         category: Some("ic".to_string()),
-        size: [6.0, n as f64],
         pins,
-        shapes,
+        buses: Vec::new(),
+        schematic: Some(ViewDef { size: [6.0, n as f64], pins: pos, shapes, svg: None }),
+        breadboard: None,
         params: Some(serde_json::json!({"gen": "dip", "pins": n})),
-        svg: None,
         meta: None,
     }
 }
 
 fn header(n: i32) -> PartDef {
     let mut pins = Vec::new();
+    let mut pos = BTreeMap::new();
     let mut shapes = vec![Shape::Rect {
         at: [1.0, 0.0],
         size: [2.0, 2.0 * n as f64],
@@ -117,7 +124,7 @@ fn header(n: i32) -> PartDef {
     }];
     for k in 1..=n {
         let y = (2 * k - 1) as f64;
-        pins.push(pin(k, [0, 2 * k - 1], Dir::Left));
+        pin(&mut pins, &mut pos, k, [0, 2 * k - 1], Dir::Left);
         shapes.push(line(&[[0.0, y], [1.6, y]]));
         shapes.push(Shape::Rect {
             at: [1.6, y - 0.4],
@@ -133,11 +140,11 @@ fn header(n: i32) -> PartDef {
         ty: format!("header{n}"),
         name: format!("Header 1x{n}"),
         category: Some("connector".to_string()),
-        size: [3.0, 2.0 * n as f64],
         pins,
-        shapes,
+        buses: Vec::new(),
+        schematic: Some(ViewDef { size: [3.0, 2.0 * n as f64], pins: pos, shapes, svg: None }),
+        breadboard: None,
         params: Some(serde_json::json!({"gen": "header", "pins": n})),
-        svg: None,
         meta: None,
     }
 }
@@ -145,25 +152,42 @@ fn header(n: i32) -> PartDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::View;
     use std::collections::HashSet;
 
+    /// Structural checks every component must pass, for every view it has.
     fn check_invariants(d: &PartDef) {
-        assert!(d.size[0] > 0.0 && d.size[1] > 0.0, "{}: empty bbox", d.ty);
         assert!(!d.pins.is_empty(), "{}: no pins", d.ty);
+        assert!(d.schematic.is_some() || d.breadboard.is_some(), "{}: no views", d.ty);
         let mut seen = HashSet::new();
         for p in &d.pins {
             assert!(seen.insert(p.id.clone()), "{}: duplicate pin id {}", d.ty, p.id);
-            let (x, y) = (p.at[0] as f64, p.at[1] as f64);
-            assert!(
-                x >= 0.0 && y >= 0.0 && x <= d.size[0] && y <= d.size[1],
-                "{}: pin {} at {:?} outside bbox {:?}",
-                d.ty,
-                p.id,
-                p.at,
-                d.size
-            );
         }
-        assert!(!d.shapes.is_empty(), "{}: no shapes", d.ty);
+        for bus in &d.buses {
+            assert!(bus.iter().all(|id| seen.contains(id)), "{}: bus names an unknown pin", d.ty);
+        }
+        for view in View::ALL {
+            let Some(v) = d.view(view) else { continue };
+            assert!(v.size[0] > 0.0 && v.size[1] > 0.0, "{} {}: empty bbox", d.ty, view.key());
+            for (id, pos) in &v.pins {
+                assert!(seen.contains(id), "{} {}: position for unknown pin {id}", d.ty, view.key());
+                let (x, y) = (pos.at[0] as f64, pos.at[1] as f64);
+                assert!(
+                    x >= 0.0 && y >= 0.0 && x <= v.size[0] && y <= v.size[1],
+                    "{} {}: pin {} at {:?} outside bbox {:?}",
+                    d.ty,
+                    view.key(),
+                    id,
+                    pos.at,
+                    v.size
+                );
+            }
+            assert!(!v.shapes.is_empty() || v.svg.is_some(), "{} {}: no artwork", d.ty, view.key());
+        }
+    }
+
+    fn at(d: &PartDef, id: &str) -> [i32; 2] {
+        d.schematic.as_ref().unwrap().pins[id].at
     }
 
     #[test]
@@ -185,13 +209,13 @@ mod tests {
     fn dip8_geometry() {
         let d = generate("dip8").unwrap();
         assert_eq!(d.ty, "dip8");
-        assert_eq!(d.size, [6.0, 8.0]);
+        assert_eq!(d.schematic.as_ref().unwrap().size, [6.0, 8.0]);
+        assert!(d.breadboard.is_none());
         assert_eq!(d.pins.len(), 8);
-        let at = |id: &str| d.pins.iter().find(|p| p.id == id).unwrap().at;
-        assert_eq!(at("1"), [0, 1]);
-        assert_eq!(at("4"), [0, 7]);
-        assert_eq!(at("5"), [6, 7]);
-        assert_eq!(at("8"), [6, 1]);
+        assert_eq!(at(&d, "1"), [0, 1]);
+        assert_eq!(at(&d, "4"), [0, 7]);
+        assert_eq!(at(&d, "5"), [6, 7]);
+        assert_eq!(at(&d, "8"), [6, 1]);
         check_invariants(&d);
         for n in (4..=40).step_by(2) {
             check_invariants(&generate(&format!("dip{n}")).unwrap());
@@ -201,10 +225,10 @@ mod tests {
     #[test]
     fn header4_geometry() {
         let d = generate("header4").unwrap();
-        assert_eq!(d.size, [3.0, 8.0]);
+        assert_eq!(d.schematic.as_ref().unwrap().size, [3.0, 8.0]);
         assert_eq!(d.pins.len(), 4);
         assert_eq!(d.pins[0].id, "1");
-        assert_eq!(d.pins[3].at, [0, 7]);
+        assert_eq!(at(&d, "4"), [0, 7]);
         check_invariants(&d);
         for n in 1..=40 {
             check_invariants(&generate(&format!("header{n}")).unwrap());
@@ -224,5 +248,6 @@ mod tests {
         let s = serde_json::to_string(&d).unwrap();
         let back = crate::parse_part(&s).unwrap();
         assert_eq!(back.pins.len(), 14);
+        assert_eq!(back.schematic.unwrap().pins.len(), 14);
     }
 }

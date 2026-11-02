@@ -1,4 +1,4 @@
-//! Static SVG export of a whole circuit.
+//! Static SVG export of a whole circuit, one view at a time.
 //!
 //! Output coordinates are grid units (the SVG user space); the root element's `width`/`height`
 //! are 10 px per unit, and the `viewBox` is the content bounding box plus a 2 unit margin
@@ -7,23 +7,38 @@
 //! Colours come from `color` (the same resolver the viewer uses): explicit colours are written as
 //! normalised `#rrggbb` hex (plus `*-opacity` when not opaque), `"none"` omits the element.
 //!
-//! Drawing order: background, title, parts (each in a `<g id="REF">`), wires, junction dots,
-//! pin dots, net labels. Text stays upright whatever the part rotation; `start`/`end` anchors
-//! of a rotated or mirrored part are swapped when the text ends up on the other side of the
-//! part centre, so labels keep pointing away from the symbol.
+//! Schematic drawing order: background, title, parts (each in a `<g id="REF">`), wires, junction
+//! dots, pin dots, net labels. Text stays upright whatever the part rotation; `start`/`end`
+//! anchors of a rotated or mirrored part are swapped when the text ends up on the other side of
+//! the part centre, so labels keep pointing away from the symbol.
+//!
+//! Breadboard: boards first, then the other parts. A view's `svg` artwork is embedded as a nested
+//! `<svg>` (position and size from the part's box, the source `viewBox` kept,
+//! `preserveAspectRatio="none"`) inside a `<g transform>` that implements the placement
+//! transform; `shapes` are drawn on top. Pins of parts without artwork get small hole markers.
+//! Wires are round-capped jumpers, coloured per net unless they carry their own colour.
 
 use crate::color::{self, Palette, Rgba};
-use crate::model::{Anchor, Circuit, Part, PartDef, Shape, Style};
-use crate::resolve::Library;
-use crate::svgimport;
+use crate::model::{
+    Anchor, Circuit, Part, PartDef, PartLookup, Placement, Shape, Style, View, ViewDef,
+};
+use crate::netlist::Netlist;
 use crate::transform::{pin_world, to_world, world_bbox};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 
 const PX_PER_UNIT: f64 = 10.0;
 const MARGIN: f64 = 2.0;
 const DEFAULT_WIDTH: f64 = 0.12;
 const WIRE_WIDTH: f64 = 0.15;
+const JUMPER_WIDTH: f64 = 0.3;
+
+/// Preset colours given to breadboard jumpers by net (in order of first appearance).
+const JUMPER_COLORS: [&str; 10] =
+    ["red", "blue", "green", "orange", "purple", "teal", "magenta", "brown", "cyan", "gold"];
+
+/// Id of the placed part in a one-part drawing (`render_part_svg`).
+pub const PART_ID: &str = "X";
 
 /// Colour of the dashed placeholder for unknown part types.
 fn error_color(dark: bool) -> &'static str {
@@ -49,88 +64,221 @@ fn attr(name: &str, c: Option<Rgba>) -> String {
     }
 }
 
-/// Render the whole circuit as a standalone SVG document.
-pub fn render_svg(circuit: &Circuit, lib: &Library, dark: bool) -> String {
+/// Render one view of the circuit as a standalone SVG document.
+pub fn render_svg(circuit: &Circuit, lib: &dyn PartLookup, dark: bool, view: View) -> String {
+    render(circuit, lib, dark, view, &[])
+}
+
+/// Label for a pin: its id, plus its name when it has a different one.
+pub fn pin_caption(id: &str, name: Option<&str>) -> String {
+    match name.map(str::trim) {
+        Some(n) if !n.is_empty() && n != id => format!("{id}:{n}"),
+        _ => id.to_string(),
+    }
+}
+
+fn fmt_num(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
+/// One-line description of a part view: `type - Name (category), WxH, N pin(s)`.
+pub fn part_title(def: &PartDef, view: View) -> String {
+    let mut s = def.ty.clone();
+    if !def.name.is_empty() && def.name != def.ty {
+        s.push_str(&format!(" - {}", def.name));
+    }
+    if let Some(c) = def.category.as_deref().filter(|c| !c.is_empty()) {
+        s.push_str(&format!(" ({c})"));
+    }
+    let size = def.view(view).map_or([0.0, 0.0], |v| v.size);
+    s.push_str(&format!(", {}x{}, {} pin(s)", fmt_num(size[0]), fmt_num(size[1]), def.pins.len()));
+    s
+}
+
+/// Draw one view of a single component: the artwork, a thin outline of its declared bounding
+/// box, every pin that has a position in the view labelled with its id (`id:name` when named),
+/// and a title line `type - name (category), WxH, N pin(s)`. `Err` when the part has no `view`.
+pub fn render_part_svg(def: &PartDef, view: View, dark: bool) -> Result<String, String> {
+    if def.view(view).is_none() {
+        return Err(format!("part \"{}\" has no {} view", def.ty, view.key()));
+    }
+    let mut d = def.clone();
+    let vm = match view {
+        View::Schematic => d.schematic.as_mut(),
+        View::Breadboard => d.breadboard.as_mut(),
+    }
+    .expect("view checked above");
+    vm.shapes.push(Shape::Rect {
+        at: [0.0, 0.0],
+        size: vm.size,
+        r: 0.0,
+        style: Style { stroke: Some("#8a8a8a".into()), fill: None, width: Some(0.04) },
+    });
+    let labels: Vec<([i32; 2], String)> = def
+        .placed_pins(view)
+        .map(|(p, pos)| (pos.at, pin_caption(&p.id, p.name.as_deref())))
+        .collect();
+    let mut part = Part { id: PART_ID.into(), ty: def.ty.clone(), hidden_label: true, ..Part::default() };
+    *part.placement_mut(view) = Some(Placement::at(0, 0));
+    let circuit = Circuit { title: Some(part_title(def, view)), parts: vec![part], ..Default::default() };
+    let mut defs = BTreeMap::new();
+    defs.insert(d.ty.clone(), d);
+    Ok(render(&circuit, &defs, dark, view, &labels))
+}
+
+fn render(circuit: &Circuit, lib: &dyn PartLookup, dark: bool, view: View, extra_labels: &[([i32; 2], String)]) -> String {
+    let schematic = view == View::Schematic;
     let pal = Palette::for_circuit(circuit, dark);
     let base = Palette::builtin(dark);
     let mut bb = Bounds::new();
     let mut body = String::new();
 
-    // Parts.
+    // Parts placed in this view (breadboard: boards first so everything sits on top of them).
+    let mut placed: Vec<(&Part, &Placement)> =
+        circuit.parts.iter().filter_map(|p| p.placement(view).map(|pl| (p, pl))).collect();
+    if !schematic {
+        placed.sort_by_key(|(p, _)| !lib.get(&p.ty).is_some_and(|d| d.is_board()));
+    }
+
+    let mut embedded: HashMap<String, Option<Embedded>> = HashMap::new();
     let mut pin_points: Vec<[i32; 2]> = Vec::new();
-    for part in &circuit.parts {
-        match lib.get(&part.ty) {
-            Some(def) => {
-                render_part(&mut body, part, def, &pal, &mut bb);
-                for p in &def.pins {
-                    pin_points.push(pin_world(part, p));
+    let mut holes: Vec<[i32; 2]> = Vec::new();
+    for (part, pl) in placed {
+        match lib.get(&part.ty).and_then(|def| def.view(view).map(|vd| (def, vd))) {
+            Some((def, vd)) => {
+                let emb = match vd.svg.as_deref() {
+                    Some(src) => embedded
+                        .entry(part.ty.clone())
+                        .or_insert_with(|| Embedded::parse(src, vd.size))
+                        .as_ref(),
+                    None => None,
+                };
+                render_part(&mut body, part, pl, vd, emb, &pal, &mut bb);
+                for (_, pos) in def.placed_pins(view) {
+                    let at = pin_world(pl, pos);
+                    pin_points.push(at);
+                    if !schematic && vd.svg.is_none() {
+                        holes.push(at);
+                    }
                 }
             }
-            None => render_unknown(&mut body, part, dark, &mut bb),
+            None => render_unknown(&mut body, part, pl, view, lib.get(&part.ty).is_some(), dark, &mut bb),
         }
     }
 
     // Wires.
-    for w in &circuit.wires {
+    let wires: Vec<&crate::model::Wire> = circuit.wires_in(view).collect();
+    let net_colors = if schematic { None } else { Some(jumper_colors(circuit, lib)) };
+    for (wi, w) in wires.iter().enumerate() {
         if w.pts.len() < 2 {
             continue;
         }
         for p in &w.pts {
             bb.add([p[0] as f64, p[1] as f64]);
         }
-        let Some(color) = color::wire_color(w, &pal) else { continue };
         let pts: Vec<String> = w.pts.iter().map(|p| format!("{},{}", p[0], p[1])).collect();
-        let _ = writeln!(
-            body,
-            "<polyline id=\"{}\" class=\"wire\" points=\"{}\" fill=\"none\" {} stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
-            esc(&w.id),
-            pts.join(" "),
-            attr("stroke", Some(color)),
-            num(WIRE_WIDTH)
-        );
-    }
-
-    // Junction dots.
-    for j in junctions(circuit, &pin_points) {
-        let Some(c) = color::junction_color(circuit, j, &pal) else { continue };
-        let _ = writeln!(
-            body,
-            "<circle class=\"junction\" cx=\"{}\" cy=\"{}\" r=\"0.3\" {}/>",
-            j[0],
-            j[1],
-            attr("fill", Some(c))
-        );
-    }
-
-    // Pin dots.
-    for p in &pin_points {
-        if pal.pin.is_some() {
+        if schematic {
+            let Some(color) = color::wire_color(w, &pal) else { continue };
             let _ = writeln!(
                 body,
-                "<circle class=\"pin\" cx=\"{}\" cy=\"{}\" r=\"0.18\" {}/>",
-                p[0],
-                p[1],
-                attr("fill", pal.pin)
+                "<polyline id=\"{}\" class=\"wire\" points=\"{}\" fill=\"none\" {} stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+                esc(&w.id),
+                pts.join(" "),
+                attr("stroke", Some(color)),
+                num(WIRE_WIDTH)
             );
-        }
-        bb.add([p[0] as f64, p[1] as f64]);
-    }
-
-    // Net labels.
-    for l in &circuit.labels {
-        let at = [l.at[0] as f64 + 0.3, l.at[1] as f64 - 0.3];
-        if let Some(c) = color::label_color(l, &pal) {
+        } else {
+            let by_net = net_colors.as_ref().and_then(|c| c.get(wi).copied().flatten());
+            let Some(color) = jumper_color(w, circuit, &pal, by_net) else { continue };
             let _ = writeln!(
                 body,
-                "<text class=\"label\" x=\"{}\" y=\"{}\" font-size=\"0.9\" font-weight=\"bold\" {}>{}</text>",
-                num(at[0]),
-                num(at[1]),
-                attr("fill", Some(c)),
-                esc(&l.name)
+                "<polyline id=\"{}\" class=\"jumper\" points=\"{}\" fill=\"none\" {} stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+                esc(&w.id),
+                pts.join(" "),
+                attr("stroke", Some(color)),
+                num(JUMPER_WIDTH)
             );
         }
-        bb.add([l.at[0] as f64, l.at[1] as f64]);
-        bb.add_text(at, &l.name, 0.9, Anchor::Start);
+    }
+
+    if schematic {
+        // Junction dots.
+        for j in junctions(&wires, &pin_points) {
+            let Some(c) = color::junction_color(circuit, j, &pal) else { continue };
+            let _ = writeln!(
+                body,
+                "<circle class=\"junction\" cx=\"{}\" cy=\"{}\" r=\"0.3\" {}/>",
+                j[0],
+                j[1],
+                attr("fill", Some(c))
+            );
+        }
+        // Pin dots.
+        for p in &pin_points {
+            if pal.pin.is_some() {
+                let _ = writeln!(
+                    body,
+                    "<circle class=\"pin\" cx=\"{}\" cy=\"{}\" r=\"0.18\" {}/>",
+                    p[0],
+                    p[1],
+                    attr("fill", pal.pin)
+                );
+            }
+            bb.add([p[0] as f64, p[1] as f64]);
+        }
+        // Net labels, then caller-supplied pin captions.
+        let own = circuit.labels.iter().map(|l| (l.at, l.name.as_str(), color::label_color(l, &pal)));
+        let extra = extra_labels.iter().map(|(at, name)| (*at, name.as_str(), pal.label));
+        for (at_pt, name, c) in own.chain(extra) {
+            let at = [at_pt[0] as f64 + 0.3, at_pt[1] as f64 - 0.3];
+            if let Some(c) = c {
+                let _ = writeln!(
+                    body,
+                    "<text class=\"label\" x=\"{}\" y=\"{}\" font-size=\"0.9\" font-weight=\"bold\" {}>{}</text>",
+                    num(at[0]),
+                    num(at[1]),
+                    attr("fill", Some(c)),
+                    esc(name)
+                );
+            }
+            bb.add([at_pt[0] as f64, at_pt[1] as f64]);
+            bb.add_text(at, name, 0.9, Anchor::Start);
+        }
+    } else {
+        // Hole markers for parts drawn without artwork.
+        for p in &holes {
+            if pal.pin.is_some() {
+                let _ = writeln!(
+                    body,
+                    "<circle class=\"hole\" cx=\"{}\" cy=\"{}\" r=\"0.15\" {}/>",
+                    p[0],
+                    p[1],
+                    attr("fill", pal.pin)
+                );
+            }
+        }
+        for p in &pin_points {
+            bb.add([p[0] as f64, p[1] as f64]);
+        }
+        for (at_pt, name) in extra_labels {
+            let at = [at_pt[0] as f64 + 0.3, at_pt[1] as f64 - 0.3];
+            if let Some(c) = pal.label {
+                let _ = writeln!(
+                    body,
+                    "<text class=\"label\" x=\"{}\" y=\"{}\" font-size=\"0.9\" font-weight=\"bold\" {}>{}</text>",
+                    num(at[0]),
+                    num(at[1]),
+                    attr("fill", Some(c)),
+                    esc(name)
+                );
+            }
+            bb.add([at_pt[0] as f64, at_pt[1] as f64]);
+            bb.add_text(at, name, 0.9, Anchor::Start);
+        }
     }
 
     // Title goes above the content.
@@ -186,6 +334,35 @@ pub fn render_svg(circuit: &Circuit, lib: &Library, dark: bool) -> String {
     out.push_str(&body);
     out.push_str("</svg>\n");
     out
+}
+
+// ---------------------------------------------------------------------------------------
+// breadboard jumpers
+
+/// Per breadboard wire (file order within the view): the preset colour of its net, assigned to
+/// nets in order of first appearance among the wires.
+fn jumper_colors(circuit: &Circuit, lib: &dyn PartLookup) -> Vec<Option<Rgba>> {
+    let nl = Netlist::build(circuit, lib, View::Breadboard);
+    let mut next: HashMap<usize, usize> = HashMap::new();
+    nl.wire_net_idx
+        .iter()
+        .map(|&net| {
+            let n = next.len();
+            let slot = *next.entry(net).or_insert(n);
+            color::parse_color(JUMPER_COLORS[slot % JUMPER_COLORS.len()])
+        })
+        .collect()
+}
+
+/// Jumper colour: `wire.color`, else `theme.wire` if the theme sets it, else the net colour.
+fn jumper_color(w: &crate::model::Wire, circuit: &Circuit, pal: &Palette, by_net: Option<Rgba>) -> Option<Rgba> {
+    let theme_sets = circuit
+        .theme
+        .as_ref()
+        .and_then(|t| t.wire.as_deref())
+        .is_some_and(|s| !matches!(color::classify(s), color::Spec::Unset));
+    let fallback = if theme_sets { pal.wire } else { by_net.or(pal.wire) };
+    color::resolve(&[w.color.as_deref()], fallback)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -303,29 +480,123 @@ fn angle_in_sweep(from: f64, delta: f64, theta: f64) -> bool {
     (theta - from).rem_euclid(360.0) <= delta
 }
 
-fn render_part(out: &mut String, part: &Part, def: &PartDef, pal: &Palette, bb: &mut Bounds) {
+// ---------------------------------------------------------------------------------------
+// embedded artwork
+
+/// The parts of a view's `svg` document needed to nest it in the output.
+struct Embedded {
+    view_box: String,
+    /// Namespace declarations of the source root (`xmlns:xlink="..."`), repeated on the nested
+    /// element so prefixed attributes in the content keep resolving.
+    namespaces: String,
+    inner: String,
+}
+
+impl Embedded {
+    /// `None` when the document is not well-formed SVG or contains script or foreign content
+    /// (the artwork is then skipped; the part's `shapes` are still drawn).
+    fn parse(src: &str, size: [f64; 2]) -> Option<Embedded> {
+        let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+        let doc = roxmltree::Document::parse_with_options(src, opts).ok()?;
+        let root = doc.root_element();
+        if !root.tag_name().name().eq_ignore_ascii_case("svg") {
+            return None;
+        }
+        for n in doc.descendants().filter(|n| n.is_element()) {
+            let tag = n.tag_name().name().to_ascii_lowercase();
+            if tag == "script" || tag == "foreignobject" {
+                return None;
+            }
+            for a in n.attributes() {
+                let name = a.name().to_ascii_lowercase();
+                let value = a.value().trim_start().to_ascii_lowercase();
+                if name.starts_with("on") || value.starts_with("javascript:") {
+                    return None;
+                }
+            }
+        }
+        let number = |name: &str| -> Option<f64> {
+            let v = root.attribute(name)?;
+            let end = v.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+')).unwrap_or(v.len());
+            v[..end].parse().ok()
+        };
+        let view_box = match root.attribute("viewBox").map(str::trim).filter(|v| !v.is_empty()) {
+            Some(v) => v.to_string(),
+            None => {
+                let w = number("width").unwrap_or(size[0] * 10.0);
+                let h = number("height").unwrap_or(size[1] * 10.0);
+                format!("0 0 {} {}", num(w), num(h))
+            }
+        };
+        let mut namespaces = String::new();
+        for ns in root.namespaces() {
+            if let Some(prefix) = ns.name() {
+                let _ = write!(namespaces, " xmlns:{prefix}=\"{}\"", esc(ns.uri()));
+            }
+        }
+        let inner = match (root.first_child(), root.last_child()) {
+            (Some(a), Some(b)) => src[a.range().start..b.range().end].to_string(),
+            _ => String::new(),
+        };
+        Some(Embedded { view_box, namespaces, inner })
+    }
+}
+
+/// SVG `transform` value for a placement: `translate` when plain, else an exact `matrix`.
+fn placement_transform(pl: &Placement) -> String {
+    let o = to_world(pl, [0.0, 0.0]);
+    if pl.rot.rem_euclid(360) == 0 && !pl.mirror {
+        return format!("translate({} {})", num(o[0]), num(o[1]));
+    }
+    let x = to_world(pl, [1.0, 0.0]);
+    let y = to_world(pl, [0.0, 1.0]);
+    format!(
+        "matrix({} {} {} {} {} {})",
+        num(x[0] - o[0]),
+        num(x[1] - o[1]),
+        num(y[0] - o[0]),
+        num(y[1] - o[1]),
+        num(o[0]),
+        num(o[1])
+    )
+}
+
+fn render_part(
+    out: &mut String,
+    part: &Part,
+    pl: &Placement,
+    vd: &ViewDef,
+    emb: Option<&Embedded>,
+    pal: &Palette,
+    bb: &mut Bounds,
+) {
     let _ = writeln!(out, "<g id=\"{}\" class=\"part\" data-type=\"{}\">", esc(&part.id), esc(&part.ty));
-    let (lo, hi) = world_bbox(part, def);
+    let (lo, hi) = world_bbox(pl, vd);
     bb.add(lo);
     bb.add(hi);
-    let center = to_world(part, [def.size[0] / 2.0, def.size[1] / 2.0]);
-    let transformed = part.rot.rem_euclid(360) != 0 || part.mirror;
+    let center = to_world(pl, [vd.size[0] / 2.0, vd.size[1] / 2.0]);
+    let transformed = pl.rot.rem_euclid(360) != 0 || pl.mirror;
 
-    let fallback;
-    let shapes: &[Shape] = if def.shapes.is_empty() {
-        fallback = def.svg.as_deref().map(|d| svgimport::path_to_shapes(d, 1.0).unwrap_or_default());
-        fallback.as_deref().unwrap_or(&[])
-    } else {
-        &def.shapes
-    };
+    if let Some(e) = emb {
+        let _ = writeln!(
+            out,
+            "<g class=\"art\" transform=\"{}\"><svg x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" viewBox=\"{}\" preserveAspectRatio=\"none\"{}>{}</svg></g>",
+            placement_transform(pl),
+            num(vd.size[0]),
+            num(vd.size[1]),
+            esc(&e.view_box),
+            e.namespaces,
+            e.inner
+        );
+    }
 
-    for s in shapes {
+    for s in &vd.shapes {
         match s {
             Shape::Line { pts, style } | Shape::Poly { pts, style } => {
                 if pts.len() < 2 {
                     continue;
                 }
-                let w: Vec<[f64; 2]> = pts.iter().map(|p| to_world(part, *p)).collect();
+                let w: Vec<[f64; 2]> = pts.iter().map(|p| to_world(pl, *p)).collect();
                 w.iter().for_each(|p| bb.add(*p));
                 let list: Vec<String> = w.iter().map(|p| format!("{},{}", num(p[0]), num(p[1]))).collect();
                 if matches!(s, Shape::Poly { .. }) {
@@ -335,7 +606,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, pal: &Palette, bb: 
                 }
             }
             Shape::Rect { at, size, r, style } => {
-                let (p0, p1) = (to_world(part, *at), to_world(part, [at[0] + size[0], at[1] + size[1]]));
+                let (p0, p1) = (to_world(pl, *at), to_world(pl, [at[0] + size[0], at[1] + size[1]]));
                 let (x, y) = (p0[0].min(p1[0]), p0[1].min(p1[1]));
                 let (w, h) = ((p1[0] - p0[0]).abs(), (p1[1] - p0[1]).abs());
                 bb.add([x, y]);
@@ -353,7 +624,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, pal: &Palette, bb: 
                 );
             }
             Shape::Circle { at, r, style } => {
-                let c = to_world(part, *at);
+                let c = to_world(pl, *at);
                 bb.add([c[0] - r, c[1] - r]);
                 bb.add([c[0] + r, c[1] + r]);
                 let _ = writeln!(
@@ -372,7 +643,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, pal: &Palette, bb: 
                 }
                 if delta < 1e-9 {
                     // Full turn.
-                    let c = to_world(part, *at);
+                    let c = to_world(pl, *at);
                     bb.add([c[0] - r, c[1] - r]);
                     bb.add([c[0] + r, c[1] + r]);
                     let _ = writeln!(
@@ -387,7 +658,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, pal: &Palette, bb: 
                 }
                 let pt = |deg: f64| {
                     let (s, c) = deg.to_radians().sin_cos();
-                    to_world(part, [at[0] + r * c, at[1] + r * s])
+                    to_world(pl, [at[0] + r * c, at[1] + r * s])
                 };
                 let (a, b) = (pt(*from), pt(*to));
                 bb.add(a);
@@ -398,7 +669,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, pal: &Palette, bb: 
                     }
                 }
                 let large = if delta > 180.0 { 1 } else { 0 };
-                let sweep = if part.mirror { 0 } else { 1 };
+                let sweep = if pl.mirror { 0 } else { 1 };
                 let _ = writeln!(
                     out,
                     "<path d=\"M{} {} A{} {} 0 {} {} {} {}\" {}/>",
@@ -419,7 +690,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, pal: &Palette, bb: 
                 if shown.is_empty() {
                     continue;
                 }
-                let p = to_world(part, *at);
+                let p = to_world(pl, *at);
                 let mut anchor = *anchor;
                 if transformed {
                     let dx = p[0] - center[0];
@@ -447,10 +718,23 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, pal: &Palette, bb: 
     out.push_str("</g>\n");
 }
 
-fn render_unknown(out: &mut String, part: &Part, dark: bool, bb: &mut Bounds) {
+/// Dashed placeholder for a part whose type is unknown, or known but without geometry for `view`.
+fn render_unknown(
+    out: &mut String,
+    part: &Part,
+    pl: &Placement,
+    view: View,
+    known_type: bool,
+    dark: bool,
+    bb: &mut Bounds,
+) {
     let err = error_color(dark);
-    let (x, y) = (part.at[0] as f64, part.at[1] as f64);
-    let label = format!("{}: {}?", part.id, part.ty);
+    let (x, y) = (pl.at[0] as f64, pl.at[1] as f64);
+    let label = if known_type {
+        format!("{}: no {} view", part.id, view.key())
+    } else {
+        format!("{}: {}?", part.id, part.ty)
+    };
     let _ = writeln!(out, "<g id=\"{}\" class=\"part unknown\" data-type=\"{}\">", esc(&part.id), esc(&part.ty));
     let _ = writeln!(
         out,
@@ -476,10 +760,10 @@ fn render_unknown(out: &mut String, part: &Part, dark: bool, bb: &mut Bounds) {
 /// Points where three or more wire arms (or pins) meet. Arms: a wire endpoint counts 1, an
 /// interior vertex 2, a pin 1, and a wire running straight through a point where another
 /// wire ends counts 2 (T junction). Crossings without a vertex never produce a dot.
-fn junctions(circuit: &Circuit, pins: &[[i32; 2]]) -> Vec<[i32; 2]> {
+fn junctions(wires: &[&crate::model::Wire], pins: &[[i32; 2]]) -> Vec<[i32; 2]> {
     let mut degree: BTreeMap<[i32; 2], u32> = BTreeMap::new();
     let mut ends: BTreeMap<[i32; 2], Vec<usize>> = BTreeMap::new();
-    for (wi, w) in circuit.wires.iter().enumerate() {
+    for (wi, w) in wires.iter().enumerate() {
         if w.pts.len() < 2 {
             continue;
         }
@@ -500,7 +784,7 @@ fn junctions(circuit: &Circuit, pins: &[[i32; 2]]) -> Vec<[i32; 2]> {
     }
     let keys: Vec<[i32; 2]> = degree.keys().copied().collect();
     for p in keys {
-        for (wi, w) in circuit.wires.iter().enumerate() {
+        for (wi, w) in wires.iter().enumerate() {
             let passes = w.pts.windows(2).any(|s| strictly_inside(p, s[0], s[1]));
             let other_end = ends.get(&p).is_some_and(|v| v.iter().any(|e| *e != wi));
             if passes && other_end {
@@ -532,7 +816,12 @@ mod tests {
 
     fn render(src: &str, dark: bool) -> String {
         let c = parse_circuit(src).unwrap();
-        render_svg(&c, &Library::load(&c, None), dark)
+        render_svg(&c, &Library::load(&c, None), dark, View::Schematic)
+    }
+
+    fn render_bb(src: &str) -> String {
+        let c = parse_circuit(src).unwrap();
+        render_svg(&c, &Library::load(&c, None), false, View::Breadboard)
     }
 
     /// Minimal well-formedness check: every open tag is closed in order.
@@ -578,23 +867,31 @@ mod tests {
     #[test]
     fn all_builtin_parts_render_balanced() {
         let lib = Library::builtin();
-        let mut c = parse_circuit(r#"{"format":"short-circ/1"}"#).unwrap();
+        let mut c = parse_circuit(r#"{"format":"short-circ/2"}"#).unwrap();
         let types: Vec<String> = lib.types().map(String::from).collect();
+        let mut drawn = 0;
         for (i, ty) in types.iter().enumerate() {
+            // Only types with a schematic view can be placed in the schematic.
+            if lib.get(ty).and_then(|d| d.schematic.as_ref()).is_none() {
+                continue;
+            }
+            drawn += 1;
             c.parts.push(Part {
                 id: format!("P{i}"),
                 ty: ty.clone(),
-                at: [(i as i32 % 6) * 14, (i as i32 / 6) * 14],
-                rot: [0, 90, 180, 270][i % 4],
-                mirror: i % 3 == 0,
                 props: [("value".to_string(), "v<&>".to_string())].into(),
+                schematic: Some(Placement {
+                    at: [(i as i32 % 6) * 14, (i as i32 / 6) * 14],
+                    rot: [0, 90, 180, 270][i % 4],
+                    mirror: i % 3 == 0,
+                }),
                 ..Part::default()
             });
         }
-        let svg = render_svg(&c, &lib, true);
+        let svg = render_svg(&c, &lib, true, View::Schematic);
         assert_balanced(&svg);
         assert!(svg.contains("v&lt;&amp;&gt;"));
-        assert_eq!(svg.matches("class=\"part\"").count(), types.len());
+        assert_eq!(svg.matches("class=\"part\"").count(), drawn);
     }
 
     #[test]
@@ -643,15 +940,7 @@ mod tests {
 
     #[test]
     fn text_expansion() {
-        let mut p = Part {
-            id: "R7".into(),
-            ty: "resistor".into(),
-            at: [0, 0],
-            rot: 0,
-            mirror: false,
-            props: Default::default(),
-            ..Part::default()
-        };
+        let mut p = Part { id: "R7".into(), ty: "resistor".into(), ..Part::default() };
         p.props.insert("tol".into(), "1%".into());
         assert_eq!(expand("{ref} {value}|{prop:tol}|{prop:zz}|{x}|{", &p, false), "R7 |1%||{x}|{");
         assert_eq!(expand("{ref}!", &p, true), "!");
@@ -727,5 +1016,161 @@ mod tests {
         assert_eq!(num(-0.0001), "0");
         assert_eq!(num(0.12345), "0.123");
         assert_eq!(num(2.5), "2.5");
+    }
+
+    // ---- breadboard ---------------------------------------------------------------------
+
+    const BB: &str = r##"{"format":"short-circ/2","title":"bb",
+        "lib":[
+          {"type":"strip","category":"board","pins":[{"id":"h1"},{"id":"h2"}],"buses":[["h1","h2"]],
+           "breadboard":{"size":[2,1],"pins":{"h1":{"at":[0,0]},"h2":{"at":[1,0]}},
+             "svg":"<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 20 10\"><rect id=\"b\" width=\"20\" height=\"10\" fill=\"#cccccc\"/></svg>"}},
+          {"type":"res","pins":[{"id":"a"},{"id":"b"}],
+           "breadboard":{"size":[4,1],"pins":{"a":{"at":[0,0]},"b":{"at":[4,0]}},
+             "shapes":[{"k":"line","pts":[[0,0],[4,0]],"stroke":"#112233"},{"k":"text","at":[2,-1],"text":"{ref}","anchor":"middle"}]}}],
+        "parts":[
+          {"id":"R1","type":"res","breadboard":{"at":[10,5],"rot":90,"mirror":true}},
+          {"id":"B1","type":"strip","breadboard":{"at":[3,4],"rot":180}}],
+        "wires":[{"id":"j1","view":"breadboard","pts":[[0,0],[0,3],[4,3]]},
+                 {"id":"j2","view":"breadboard","pts":[[8,0],[8,3]],"color":"#ff8800"},
+                 {"id":"j3","view":"breadboard","pts":[[20,0],[20,3]]},
+                 {"id":"s1","pts":[[0,0],[5,0]]}]}"##;
+
+    #[test]
+    fn breadboard_embeds_artwork_in_a_transformed_group() {
+        let svg = render_bb(BB);
+        assert_balanced(&svg);
+        // Boards are drawn before other parts whatever the file order.
+        assert!(svg.find("<g id=\"B1\"").unwrap() < svg.find("<g id=\"R1\"").unwrap());
+        // B1 at (3,4) rot 180: matrix (-1 0 0 -1 3 4); nested svg uses the part size and source viewBox.
+        assert!(svg.contains(
+            "<g class=\"art\" transform=\"matrix(-1 0 0 -1 3 4)\"><svg x=\"0\" y=\"0\" width=\"2\" height=\"1\" viewBox=\"0 0 20 10\" preserveAspectRatio=\"none\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"><rect id=\"b\" width=\"20\" height=\"10\" fill=\"#cccccc\"/></svg></g>"
+        ), "{svg}");
+        // Shapes of R1 (no artwork) are drawn in world coordinates: mirror then rot 90 then translate.
+        // local (0,0)->(10,5), (4,0): mirror (-4,0) -> rot90 (0,-4) -> (10,1).
+        assert!(svg.contains("<polyline points=\"10,5 10,1\""), "{svg}");
+        assert!(svg.contains("stroke=\"#112233\""));
+        // Hole markers only for the part without artwork.
+        assert_eq!(svg.matches("class=\"hole\"").count(), 2);
+        // Schematic wires are not drawn.
+        assert!(!svg.contains("id=\"s1\""));
+        // No grid dots or junctions.
+        assert!(!svg.contains("class=\"pin\"") && !svg.contains("class=\"junction\""));
+    }
+
+    #[test]
+    fn breadboard_part_transform_is_exact_for_all_rotations() {
+        for (rot, mirror, m) in [
+            (0, false, "translate(3 4)"),
+            (90, false, "matrix(0 1 -1 0 3 4)"),
+            (180, false, "matrix(-1 0 0 -1 3 4)"),
+            (270, false, "matrix(0 -1 1 0 3 4)"),
+            (0, true, "matrix(-1 0 0 1 3 4)"),
+            (90, true, "matrix(0 -1 -1 0 3 4)"),
+        ] {
+            assert_eq!(placement_transform(&Placement { at: [3, 4], rot, mirror }), m, "rot {rot} mirror {mirror}");
+        }
+        // The matrix maps the local point (1,2) like to_world does.
+        let pl = Placement { at: [3, 4], rot: 90, mirror: true };
+        let w = to_world(&pl, [1.0, 2.0]);
+        // matrix(0 -1 -1 0 3 4): x' = 0*1 + -1*2 + 3 = 1, y' = -1*1 + 0*2 + 4 = 3
+        assert_eq!(w, [1.0, 3.0]);
+    }
+
+    #[test]
+    fn jumpers_are_round_capped_and_coloured_per_net() {
+        let svg = render_bb(BB);
+        let j = |id: &str| {
+            let i = svg.find(&format!("<polyline id=\"{id}\"")).unwrap();
+            &svg[i..i + svg[i..].find("/>").unwrap()]
+        };
+        assert!(j("j1").contains("class=\"jumper\"") && j("j1").contains("stroke-linecap=\"round\""));
+        assert!(j("j1").contains("points=\"0,0 0,3 4,3\""));
+        // Own colour wins; the others get distinct preset colours by net (red, blue, green...).
+        assert!(j("j2").contains("stroke=\"#ff8800\""));
+        assert!(j("j1").contains("stroke=\"#d93025\""), "first net is red: {}", j("j1"));
+        assert!(j("j3").contains("stroke=\"#1e8e3e\""), "third net is green (j2 took blue): {}", j("j3"));
+    }
+
+    #[test]
+    fn jumper_colour_follows_theme_wire_and_none() {
+        let svg = render_bb(&BB.replace(r#""title":"bb","#, r##""title":"bb","theme":{"wire":"gold"},"##));
+        assert!(svg.contains("id=\"j1\" class=\"jumper\" points=\"0,0 0,3 4,3\" fill=\"none\" stroke=\"#d4a017\""));
+        let svg = render_bb(&BB.replace(r##""color":"#ff8800""##, r##""color":"none""##));
+        assert!(!svg.contains("id=\"j2\""));
+    }
+
+    #[test]
+    fn unsafe_or_broken_artwork_is_skipped_but_shapes_remain() {
+        let bad = r#"{"format":"short-circ/2","lib":[{"type":"x","pins":[{"id":"a"}],"breadboard":{"size":[2,1],
+            "pins":{"a":{"at":[0,0]}},"svg":"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>",
+            "shapes":[{"k":"circle","at":[1,0],"r":0.4}]}}],"parts":[{"id":"X1","type":"x","breadboard":{"at":[0,0]}}]}"#;
+        let svg = render_bb(bad);
+        assert_balanced(&svg);
+        assert!(!svg.contains("script") && !svg.contains("class=\"art\""));
+        assert!(svg.contains("<circle cx=\"1\" cy=\"0\" r=\"0.4\""));
+        let broken = bad.replace("<script>alert(1)</script></svg>", "<g></svg>");
+        assert!(!render_bb(&broken).contains("class=\"art\""));
+        let handler = bad.replace("<script>alert(1)</script>", "<rect onload=\\\"x()\\\"/>");
+        assert!(!render_bb(&handler).contains("class=\"art\""));
+    }
+
+    #[test]
+    fn artwork_without_viewbox_uses_width_and_height() {
+        let src = r#"{"format":"short-circ/2","lib":[{"type":"x","pins":[{"id":"a"}],"breadboard":{"size":[2,1],
+            "pins":{"a":{"at":[0,0]}},"svg":"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40px\" height=\"20\"><circle r=\"3\"/></svg>"}}],
+            "parts":[{"id":"X1","type":"x","breadboard":{"at":[0,0]}}]}"#;
+        assert!(render_bb(src).contains("viewBox=\"0 0 40 20\""));
+    }
+
+    #[test]
+    fn unknown_and_viewless_parts_get_placeholders() {
+        let svg = render_bb(
+            r#"{"format":"short-circ/2","parts":[{"id":"X1","type":"nope","breadboard":{"at":[0,0]}},
+            {"id":"V1","type":"vcc","breadboard":{"at":[8,0]}}]}"#,
+        );
+        assert_balanced(&svg);
+        assert!(svg.contains("X1: nope?"));
+        assert!(svg.contains("V1: no breadboard view") || svg.contains("class=\"part\" data-type=\"vcc\""));
+    }
+
+    #[test]
+    fn views_draw_only_their_own_parts_and_wires() {
+        let c = parse_circuit(BB).unwrap();
+        let lib = Library::load(&c, None);
+        let s = render_svg(&c, &lib, false, View::Schematic);
+        assert!(s.contains("id=\"s1\"") && !s.contains("id=\"j1\"") && !s.contains("id=\"R1\""));
+    }
+
+    #[test]
+    fn render_part_svg_labels_pins_and_outlines_the_box() {
+        let d = crate::builtin::generate("dip8").unwrap();
+        let svg = render_part_svg(&d, View::Schematic, false).unwrap();
+        assert_balanced(&svg);
+        assert_eq!(svg.matches("class=\"label\"").count(), 8, "one label per pin");
+        assert!(svg.contains(">8</text>"));
+        assert!(svg.contains("dip8 - DIP-8 (ic), 6x8, 8 pin(s)"));
+        assert!(svg.contains("stroke=\"#8a8a8a\""), "bbox outline");
+        assert!(render_part_svg(&d, View::Breadboard, false).unwrap_err().contains("no breadboard view"));
+        // The input is not modified.
+        assert_eq!(d.schematic.as_ref().unwrap().shapes.len(), crate::builtin::generate("dip8").unwrap().schematic.unwrap().shapes.len());
+    }
+
+    #[test]
+    fn render_part_svg_breadboard_shows_artwork_and_captions() {
+        let c = parse_circuit(BB).unwrap();
+        let strip = c.lib.iter().find(|d| d.ty == "strip").unwrap();
+        let svg = render_part_svg(strip, View::Breadboard, true).unwrap();
+        assert_balanced(&svg);
+        assert!(svg.contains("class=\"art\"") && svg.contains(">h1</text>") && svg.contains(">h2</text>"));
+        assert!(svg.contains("strip (board), 2x1, 2 pin(s)"));
+    }
+
+    #[test]
+    fn pin_captions() {
+        assert_eq!(pin_caption("1", None), "1");
+        assert_eq!(pin_caption("1", Some("VCC")), "1:VCC");
+        assert_eq!(pin_caption("a", Some("a")), "a");
+        assert_eq!(pin_caption("a", Some(" ")), "a");
     }
 }
