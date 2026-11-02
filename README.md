@@ -1,6 +1,6 @@
 # short-circ
 
-short-circ is a small, portable Windows viewer for circuit diagrams. Circuits are plain JSON files (`.circ`) that are easy to read, diff and generate. The viewer draws them in a Fritzing-like style, checks them for common wiring mistakes, and exports them to SVG.
+short-circ is a small, portable Windows viewer for circuit diagrams. Circuits are plain JSON files (`.circ`) that are easy to read. The viewer checks them for common wiring mistakes and exports to SVG.
 
 It is a single static `.exe` built with Rust and [egui](https://github.com/emilk/egui). There is no installer, no runtime and no web view. The same executable also runs as a headless command-line tool.
 
