@@ -56,7 +56,7 @@ fn checked(c: &Circuit, o: &RouteOptions) -> RouteOutcome {
     // Accounting.
     for id in &out.placed {
         assert!(out.circuit.part(id).unwrap().placement(o.to).is_some(), "placed {id} has no placement");
-        assert!(c.part(id).map_or(true, |p| p.placement(o.to).is_none()), "{id} was already placed");
+        assert!(c.part(id).is_none_or(|p| p.placement(o.to).is_none()), "{id} was already placed");
     }
     assert_eq!(out.circuit.wires.len(), c.wires.len() + out.wires_added.len() - removed_wires(c, &out.circuit, o), "wires_added accuracy");
     for id in &out.wires_added {
@@ -278,6 +278,30 @@ fn multi_pin_net_is_one_tree() {
     assert!(out.failures.is_empty(), "{:?}", out.failures);
     assert_eq!(out.routed, 1);
     assert!(out.wires_added.len() >= 3);
+}
+
+#[test]
+fn partial_routing_is_completed_and_kept() {
+    // R1.b and R2.b are already wired; R3.b joins them (T-junction or pin end), the old wire stays.
+    let c = parse_circuit(
+        r#"{"format":"short-circ/2","parts":[
+          {"id":"R1","type":"resistor","schematic":{"at":[10,10]}},
+          {"id":"R2","type":"resistor","schematic":{"at":[10,30]}},
+          {"id":"R3","type":"resistor","schematic":{"at":[40,20]}}],
+        "wires":[{"id":"old","pts":[[18,11],[24,11],[24,31],[18,31]]}],
+        "nets":[{"pins":["R1.b","R2.b","R3.a"]}]}"#,
+    )
+    .unwrap();
+    let out = checked(&c, &declared(View::Schematic));
+    assert!(out.failures.is_empty(), "{:?}", out.failures);
+    assert_eq!(out.routed, 1);
+    assert_eq!(out.wires_added.len(), 1, "one new wire joins R3 to the existing tree");
+    assert_eq!(out.circuit.wires[0].id, "old");
+    assert_eq!(out.circuit.wires[0].pts, c.wires[0].pts);
+    // Scope unrouted still sees the net as unrouted (R3.a is not connected yet) and completes it.
+    let mut o = declared(View::Schematic);
+    o.scope = Scope::Unrouted;
+    assert_eq!(checked(&c, &o).wires_added.len(), 1);
 }
 
 #[test]
@@ -650,7 +674,7 @@ fn jumper_styles_end_on_holes_and_are_valid() {
             for w in out.circuit.wires_in(View::Breadboard) {
                 // both ends touch a pin (hole or leg)
                 for end in [w.pts[0], *w.pts.last().unwrap()] {
-                    assert!(nl.net_at(end).is_some_and(|n| nl.nets[n].pins.len() >= 1), "{style:?}: {} end {end:?}", w.id);
+                    assert!(nl.net_at(end).is_some_and(|n| !nl.nets[n].pins.is_empty()), "{style:?}: {} end {end:?}", w.id);
                 }
                 match style {
                     JumperStyle::Straight => assert_eq!(w.pts.len(), 2),
@@ -796,6 +820,8 @@ fn astable_555_ports_to_both_views() {
     let sch = checked(&c, &declared(View::Schematic));
     eprintln!("555 schematic: wires {} labels {} failures {:?}", sch.wires_added.len(), sch.circuit.labels.len(), sch.failures);
     assert!(sch.failures.is_empty());
+    // Some nets are wired, the rest (planar-impossible around the IC) get labels.
+    assert!(sch.wires_added.len() >= 4, "{}", sch.wires_added.len());
     let bb = checked(&c, &declared(View::Breadboard));
     eprintln!("555 breadboard: jumpers {} failures {:?} placed {}", bb.wires_added.len(), bb.failures, bb.placed.len());
     assert!(bb.failures.is_empty(), "{:?}", bb.failures);

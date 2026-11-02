@@ -108,10 +108,7 @@ fn place_missing(c: &mut Circuit, lib: &dyn PartLookup, nets: &[SrcNet], opts: &
     let weight = |i: usize| adj.get(&i).map(|m| m.values().sum::<u32>()).unwrap_or(0);
     let mut visited: HashSet<usize> = HashSet::new();
     let mut order: Vec<usize> = Vec::new();
-    loop {
-        let Some(start) = mains.iter().copied().filter(|i| !visited.contains(i)).max_by_key(|&i| (weight(i), Reverse(i))) else {
-            break;
-        };
+    while let Some(start) = mains.iter().copied().filter(|i| !visited.contains(i)).max_by_key(|&i| (weight(i), Reverse(i))) {
         visited.insert(start);
         let mut q = VecDeque::from([start]);
         while let Some(p) = q.pop_front() {
@@ -497,7 +494,7 @@ fn route(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[Src
     let (x0, y0) = (lo[0] - margin, lo[1] - margin);
     let (w, h) = (hi[0] - lo[0] + 2 * margin + 1, hi[1] - lo[1] + 2 * margin + 1);
     let ncell = (w as i64 * h as i64) as usize;
-    if ncell > 40_000_000 {
+    if ncell > 4_000_000 {
         for wk in &works {
             acc.failures.push(RouteFailure { net: nets[wk.net].display(), reason: "layout too large to route".into() });
         }
@@ -650,6 +647,7 @@ fn route(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[Src
     let mut ids = IdGen::new(c);
     let mut existing_names: HashSet<String> = c.labels.iter().map(|l| l.name.clone()).collect();
     existing_names.extend(nets.iter().filter_map(|n| n.name.clone()));
+    existing_names.extend(c.nets.iter().filter_map(|n| n.name.clone()));
     let mut taken: HashMap<String, usize> = HashMap::new();
     let label_nets: Vec<(String, Option<usize>)> = c.labels.iter().map(|l| (l.name.clone(), nl.net_at(l.at))).collect();
     let mut new_labels: Vec<Label> = Vec::new();
@@ -807,7 +805,7 @@ fn route_net(
                     let vertex = din.is_none() || dout.is_none() || din != dout;
                     let kind = if vertex {
                         K_OTHER
-                    } else if din.is_some_and(|d| d % 2 == 0) {
+                    } else if din.is_some_and(|d| d.is_multiple_of(2)) {
                         K_H
                     } else {
                         K_V
@@ -917,8 +915,8 @@ fn search(
             return false;
         }
         match st.kind[i] {
-            K_H => d % 2 == 1,
-            K_V => d % 2 == 0,
+            K_H => !d.is_multiple_of(2),
+            K_V => d.is_multiple_of(2),
             _ => false,
         }
     };
