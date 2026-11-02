@@ -6,7 +6,14 @@ mod app;
 mod canvas;
 mod cli;
 mod core_api;
+mod labels;
+mod nets_panel;
+mod netlist_out;
+mod partbrowser;
+mod partview;
 mod recent;
+mod reload;
+mod window;
 
 use std::path::PathBuf;
 

@@ -114,6 +114,8 @@ Exit code: 0 no errors (warnings allowed), 1 errors, 2 unreadable input.
 - `short-circ.exe [file.circ]` open GUI
 - `short-circ.exe --validate file.circ [--json]`
 - `short-circ.exe --render file.circ out.svg [--dark]`
+- `short-circ.exe --netlist file.circ [--json]` prints every net as `net ID  NAME-or--  pins: R1.a, B1.pos  wires: w1, w2` (pins sorted naturally, `-` for an empty list). With `--json`: `{"nets":[{"id":0,"name":"GND","pins":["R1.b"],"wires":["w1"]}]}`; `name` is `null` for an unlabelled net. Exit 0 ok, 2 unreadable. Use it to check connectivity as the netlist builder sees it.
+- `short-circ.exe --render-part TYPE out.svg [--dark] [--circuit-dir DIR]` draws one part with every pin id (`id` or `id:name`) labelled at its pin position, plus its declared bounding box and a title line `type - name (category), WxH, N pin(s)`. `TYPE` resolves like a circuit would (`DIR/parts`, the exe's `parts/`, built-ins, generated `dipN`/`headerN`). Exit 0 written, 1 unknown type or write error. Use it to check part geometry and pin placement.
 - `short-circ.exe --import-svg in.svg out.part --type NAME [--pins "a:0,1;b:8,1"] [--scale PX_PER_UNIT]`
 - `short-circ.exe --list-parts` prints resolvable component types
 The GUI never requires any of these tools, and nothing in this repo outside `.claude/skills/` refers to Claude.

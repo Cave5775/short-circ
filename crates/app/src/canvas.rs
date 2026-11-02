@@ -2,6 +2,7 @@
 //! The math is kept free of any egui context so it can be unit tested.
 
 use eframe::egui::{self, Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2};
+use crate::labels::{self, LabelOpts};
 use short_circ_core::transform::{pin_world, to_world, world_bbox};
 use short_circ_core::{Anchor, Circuit, Library, Part, PartDef, Pt, Shape as Sh, Style, Wire};
 
@@ -78,7 +79,14 @@ impl View {
 
 /// Expand `{ref}`, `{value}` and `{prop:name}` in part text. Unknown or unterminated
 /// braces are kept literally; a missing property expands to the empty string.
+#[cfg(test)]
 pub fn expand_text(text: &str, part: &Part) -> String {
+    expand_text_with(text, part, true, true)
+}
+
+/// Like [`expand_text`] but `{ref}` and `{value}` expand to nothing when their flag is off
+/// (`{ref}` is also empty for a part with `hidden_label`).
+pub fn expand_text_with(text: &str, part: &Part, show_ref: bool, show_value: bool) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(i) = rest.find('{') {
@@ -90,6 +98,8 @@ pub fn expand_text(text: &str, part: &Part) -> String {
         };
         let key = &after[..j];
         let val = match key {
+            "ref" if !show_ref || part.hidden_label => Some(String::new()),
+            "value" if !show_value => Some(String::new()),
             "ref" => Some(part.id.clone()),
             "value" => Some(part.props.get("value").cloned().unwrap_or_default()),
             _ => key.strip_prefix("prop:").map(|n| part.props.get(n).cloned().unwrap_or_default()),
@@ -425,14 +435,15 @@ pub struct DrawCtx<'a> {
     pub origin: Pos2,
     pub view: View,
     pub theme: Theme,
+    pub labels: LabelOpts,
 }
 
 impl DrawCtx<'_> {
-    fn pt(&self, w: [f64; 2]) -> Pos2 {
+    pub(crate) fn pt(&self, w: [f64; 2]) -> Pos2 {
         self.view.to_screen(self.origin, w)
     }
 
-    fn px(&self, units: f64) -> f32 {
+    pub(crate) fn px(&self, units: f64) -> f32 {
         units as f32 * self.view.scale
     }
 }
@@ -526,11 +537,12 @@ pub fn draw_circuit(
         let p = d.pt([l.at[0] as f64, l.at[1] as f64]);
         draw_text(d, p + Vec2::new(d.px(0.2), -d.px(0.2)), &l.name, 0.9, Anchor::Start, t.wire);
     }
+    labels::draw_overlay(d, circuit, lib);
 }
 
 fn draw_text(d: &DrawCtx, at: Pos2, text: &str, size_units: f64, anchor: Anchor, color: Color32) {
-    let px = d.px(size_units);
-    if px < 4.0 || text.is_empty() {
+    let Some(px) = labels::text_px(size_units, d.view.scale) else { return };
+    if text.is_empty() {
         return;
     }
     let align = match anchor {
@@ -577,7 +589,8 @@ fn draw_part(d: &DrawCtx, part: &Part, def: &PartDef) {
             }
             Sh::Text { at, text, size, anchor, style } => {
                 let p = d.pt(to_world(part, *at));
-                draw_text(d, p, &expand_text(text, part), *size, *anchor, resolve_stroke(style, &d.theme));
+                let shown = expand_text_with(text, part, d.labels.refs, d.labels.values);
+                draw_text(d, p, &shown, *size, *anchor, resolve_stroke(style, &d.theme));
             }
         }
     }

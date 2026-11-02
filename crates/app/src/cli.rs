@@ -13,6 +13,8 @@ pub enum Command {
     Validate { file: PathBuf, json: bool },
     Render { file: PathBuf, out: PathBuf, dark: bool },
     ImportSvg { input: PathBuf, out: PathBuf, ty: String, pins: PinSpec, scale: Option<f64> },
+    Netlist { file: PathBuf, json: bool },
+    RenderPart { ty: String, out: PathBuf, dark: bool, circuit_dir: Option<PathBuf> },
     ListParts,
     Help,
     Version,
@@ -30,6 +32,11 @@ USAGE:
                                               import SVG artwork as a component file
                                               SPEC is id:x,y entries separated by ; (grid units),
                                               PX is pixels per grid unit (default 10)
+  short-circ --netlist FILE.circ [--json]     print each net: id, name, pins (R1.a), wire ids
+                                              (exit 0 ok, 2 unreadable)
+  short-circ --render-part TYPE OUT.svg [--dark] [--circuit-dir DIR]
+                                              draw one part with its pin ids labelled
+                                              (exit 1 if TYPE is unknown; dipN/headerN work)
   short-circ --list-parts                     list available component types
   short-circ --help | --version
 
@@ -46,6 +53,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut positional: Vec<PathBuf> = Vec::new();
     let (mut json, mut dark) = (false, false);
     let (mut ty, mut pins, mut scale) = (None::<String>, None::<String>, None::<String>);
+    let mut circuit_dir = None::<String>;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -54,17 +62,23 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--list-parts" => set_mode(&mut mode, "list-parts")?,
             "--validate" => set_mode(&mut mode, "validate")?,
             "--render" => set_mode(&mut mode, "render")?,
+            "--netlist" => set_mode(&mut mode, "netlist")?,
+            "--render-part" => set_mode(&mut mode, "render-part")?,
             "--import-svg" => set_mode(&mut mode, "import-svg")?,
             "--json" => json = true,
             "--dark" => dark = true,
             "--type" => ty = Some(take_value(&mut it, "--type")?),
             "--pins" => pins = Some(take_value(&mut it, "--pins")?),
             "--scale" => scale = Some(take_value(&mut it, "--scale")?),
+            "--circuit-dir" => circuit_dir = Some(take_value(&mut it, "--circuit-dir")?),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => positional.push(PathBuf::from(a)),
         }
     }
     let import_flags = ty.is_some() || pins.is_some() || scale.is_some();
+    if circuit_dir.is_some() && mode != Some("render-part") {
+        return Err("--circuit-dir only applies to --render-part".into());
+    }
     match mode {
         None => {
             if json || dark {
@@ -116,9 +130,35 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             let out = positional.remove(1);
             Ok(Command::ImportSvg { input: positional.remove(0), out, ty, pins, scale })
         }
+        Some("netlist") => {
+            if dark {
+                return Err("--dark does not apply to --netlist".into());
+            }
+            if import_flags {
+                return Err("--type, --pins and --scale only apply to --import-svg".into());
+            }
+            if positional.len() != 1 {
+                return Err("--netlist needs exactly one FILE".into());
+            }
+            Ok(Command::Netlist { file: positional.remove(0), json })
+        }
+        Some("render-part") => {
+            if json {
+                return Err("--json does not apply to --render-part".into());
+            }
+            if import_flags {
+                return Err("--type, --pins and --scale only apply to --import-svg".into());
+            }
+            if positional.len() != 2 {
+                return Err("--render-part needs TYPE and OUT.svg".into());
+            }
+            let ty = positional.remove(0).to_string_lossy().into_owned();
+            let out = positional.remove(0);
+            Ok(Command::RenderPart { ty, out, dark, circuit_dir: circuit_dir.map(PathBuf::from) })
+        }
         Some(_) => {
             if json {
-                return Err("--json only applies to --validate".into());
+                return Err("--json only applies to --validate and --netlist".into());
             }
             if import_flags {
                 return Err("--type, --pins and --scale only apply to --import-svg".into());
@@ -206,6 +246,10 @@ pub fn run(cmd: Command) -> i32 {
         }
         Command::Validate { file, json } => validate(&file, json),
         Command::Render { file, out, dark } => render(&file, &out, dark),
+        Command::Netlist { file, json } => crate::netlist_out::run(&file, json),
+        Command::RenderPart { ty, out, dark, circuit_dir } => {
+            crate::partview::run(&ty, &out, dark, circuit_dir.as_deref())
+        }
         Command::ImportSvg { input, out, ty, pins, scale } => {
             import_svg_file(&input, &out, &ty, &pins, scale)
         }
@@ -423,6 +467,39 @@ mod tests {
             Command::Render { file: "a.circ".into(), out: "o.svg".into(), dark: true }
         );
         assert!(p(&["--render", "a.circ"]).is_err());
+    }
+
+    #[test]
+    fn netlist_args() {
+        let want = Command::Netlist { file: "a.circ".into(), json: true };
+        assert_eq!(p(&["--netlist", "a.circ", "--json"]).unwrap(), want);
+        assert_eq!(p(&["--json", "--netlist", "a.circ"]).unwrap(), want);
+        assert_eq!(
+            p(&["--netlist", "a.circ"]).unwrap(),
+            Command::Netlist { file: "a.circ".into(), json: false }
+        );
+        assert!(p(&["--netlist"]).is_err());
+        assert!(p(&["--netlist", "a", "b"]).is_err());
+        assert!(p(&["--netlist", "a", "--dark"]).is_err());
+        assert!(p(&["--netlist", "a", "--validate", "b"]).is_err());
+    }
+
+    #[test]
+    fn render_part_args() {
+        assert_eq!(
+            p(&["--render-part", "dip8", "o.svg", "--dark", "--circuit-dir", "d"]).unwrap(),
+            Command::RenderPart { ty: "dip8".into(), out: "o.svg".into(), dark: true, circuit_dir: Some("d".into()) }
+        );
+        assert_eq!(
+            p(&["--render-part", "dip8", "o.svg"]).unwrap(),
+            Command::RenderPart { ty: "dip8".into(), out: "o.svg".into(), dark: false, circuit_dir: None }
+        );
+        assert!(p(&["--render-part", "dip8"]).is_err());
+        assert!(p(&["--render-part", "a", "b", "c"]).is_err());
+        assert!(p(&["--render-part", "a", "b", "--json"]).is_err());
+        assert!(p(&["--render-part", "a", "b", "--circuit-dir"]).is_err(), "value missing");
+        assert!(p(&["--render", "a.circ", "o.svg", "--circuit-dir", "d"]).is_err());
+        assert!(p(&["--circuit-dir", "d", "a.circ"]).is_err());
     }
 
     #[test]

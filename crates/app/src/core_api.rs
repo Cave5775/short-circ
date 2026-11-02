@@ -18,7 +18,6 @@ pub struct PinRef {
 /// One electrical net (mirrors `core::netlist::Net`).
 #[derive(Debug, Clone, Default)]
 pub struct Net {
-    #[allow(dead_code)] // mirrors core::netlist::Net; used once the adapter is wired
     pub id: usize,
     pub name: String,
     pub pins: Vec<PinRef>,
@@ -40,9 +39,12 @@ impl Nets {
         self.nets.iter().find(|n| n.wires.iter().any(|w| w == wire))
     }
 
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.nets.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Net> {
+        self.nets.iter()
     }
 }
 

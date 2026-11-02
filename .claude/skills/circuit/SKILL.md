@@ -18,6 +18,8 @@ Use `short-circ.exe` from, in order: the user's stated path, `target/release/sho
 CLI (exit codes: 0 ok, 1 errors found, 2 unreadable input):
 - `short-circ.exe --validate FILE.circ [--json]`
 - `short-circ.exe --render FILE.circ OUT.svg [--dark]`
+- `short-circ.exe --netlist FILE.circ [--json]` (every net with its pins `R1.a` and wire ids; use it to verify connectivity)
+- `short-circ.exe --render-part TYPE OUT.svg [--dark] [--circuit-dir DIR]` (one part with all pin ids labelled; use it to verify part geometry, add `--circuit-dir` for a circuit's own `parts/`)
 - `short-circ.exe --list-parts` (resolvable component types; `dipN` and `headerN` are generated on demand)
 - `short-circ.exe --import-svg IN.svg OUT.part --type NAME [--pins "a:0,1;b:8,1"] [--scale PX_PER_UNIT]`
 
