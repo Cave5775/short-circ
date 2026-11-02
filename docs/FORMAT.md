@@ -117,3 +117,12 @@ Exit code: 0 no errors (warnings allowed), 1 errors, 2 unreadable input.
 - `short-circ.exe --import-svg in.svg out.part --type NAME [--pins "a:0,1;b:8,1"]`
 - `short-circ.exe --list-parts` prints resolvable component types
 The GUI never requires any of these tools, and nothing in this repo outside `.claude/skills/` refers to Claude.
+
+## Clarifications from the reference implementation
+- Any wire vertex or endpoint lying on another wire's segment connects (T-junction), including interior vertices.
+- A pin lying in a wire's interior without a vertex there is NOT connected; it raises `wire-through-pin`.
+- A label that touches nothing is ignored. `net-short` currently covers only two different label names on one net; its `ids` are the label names.
+- `wire-overlap`/`wire-crossing` report one issue per wire pair; `dangling-wire` one per dangling endpoint; `unconnected-pin` has `ids=[part]` with the pin id in the message.
+- A wire endpoint also counts as touching if a label name appears at least twice at that point set (closed loops are not dangling).
+- Text positions are SVG baselines and text stays upright when parts rotate. `{ref}` is empty when `hidden_label` is set.
+- `stroke:"none"` in a shape means no outline. A missing `fill` means no fill.
