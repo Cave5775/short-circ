@@ -1,0 +1,18 @@
+{
+  "format": "short-circ/1",
+  "type": "voltage_source_ac",
+  "name": "AC voltage source",
+  "category": "source",
+  "size": [4, 4],
+  "pins": [
+    {"id": "pos", "at": [2, 0], "dir": "up"},
+    {"id": "neg", "at": [2, 4], "dir": "down"}
+  ],
+  "shapes": [
+    {"k": "circle", "at": [2, 2], "r": 2},
+    {"k": "arc", "at": [1.5, 2], "r": 0.5, "from": 180, "to": 360},
+    {"k": "arc", "at": [2.5, 2], "r": 0.5, "from": 0, "to": 180},
+    {"k": "text", "at": [4.6, 1.8], "text": "{ref}", "size": 0.9, "anchor": "start"},
+    {"k": "text", "at": [4.6, 3], "text": "{value}", "size": 0.9, "anchor": "start"}
+  ]
+}

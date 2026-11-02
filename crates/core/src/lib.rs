@@ -5,6 +5,8 @@ pub mod builtin;
 pub mod model;
 pub mod netlist;
 pub mod resolve;
+pub mod svg;
+pub mod svgimport;
 pub mod transform;
 pub mod validate;
 

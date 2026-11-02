@@ -1,0 +1,26 @@
+{
+  "format": "short-circ/1",
+  "type": "opamp",
+  "name": "Op-amp",
+  "category": "ic",
+  "size": [8, 6],
+  "pins": [
+    {"id": "in-", "at": [0, 1], "dir": "left", "name": "IN-"},
+    {"id": "in+", "at": [0, 5], "dir": "left", "name": "IN+"},
+    {"id": "out", "at": [8, 3], "dir": "right", "name": "OUT"},
+    {"id": "v+", "at": [4, 0], "dir": "up", "name": "V+"},
+    {"id": "v-", "at": [4, 6], "dir": "down", "name": "V-"}
+  ],
+  "shapes": [
+    {"k": "line", "pts": [[0, 1], [1, 1]]},
+    {"k": "line", "pts": [[0, 5], [1, 5]]},
+    {"k": "poly", "pts": [[1, 0], [1, 6], [7, 3]]},
+    {"k": "line", "pts": [[7, 3], [8, 3]]},
+    {"k": "line", "pts": [[4, 0], [4, 1.5]]},
+    {"k": "line", "pts": [[4, 6], [4, 4.5]]},
+    {"k": "text", "at": [1.4, 1.35], "text": "-", "size": 0.9, "anchor": "start"},
+    {"k": "text", "at": [1.4, 5.35], "text": "+", "size": 0.9, "anchor": "start"},
+    {"k": "text", "at": [2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+    {"k": "text", "at": [2, 7.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+  ]
+}
