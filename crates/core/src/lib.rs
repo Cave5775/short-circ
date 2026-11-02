@@ -3,11 +3,15 @@
 
 pub mod builtin;
 pub mod model;
+pub mod netlist;
 pub mod resolve;
 pub mod transform;
+pub mod validate;
 
 pub use model::*;
+pub use netlist::{Net, Netlist, PinRef};
 pub use resolve::Library;
+pub use validate::validate;
 
 /// Parse a `.circ` JSON document.
 pub fn parse_circuit(src: &str) -> Result<Circuit, serde_json::Error> {
