@@ -7,6 +7,27 @@ use eframe::egui::{self, Color32, PointerButton, RichText, Sense, Vec2};
 use short_circ_core::{Circuit, Library, Pt, Report, Severity};
 use std::path::{Path, PathBuf};
 
+/// Read-only colour display: a swatch and the hex code (plus the name as written if it differs).
+fn color_value(ui: &mut egui::Ui, spec: &str) {
+    ui.horizontal(|ui| match short_circ_core::color::parse_color(spec) {
+        Some(c) => {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+            ui.painter().rect_filled(r, 2.0, canvas::to_color32(c));
+            let edge = ui.visuals().widgets.noninteractive.fg_stroke.color;
+            ui.painter().rect_stroke(r, 2.0, egui::Stroke::new(1.0, edge), egui::StrokeKind::Inside);
+            let hex = c.to_hex();
+            if spec.trim().eq_ignore_ascii_case(&hex) {
+                ui.label(hex);
+            } else {
+                ui.label(format!("{hex} ({})", spec.trim()));
+            }
+        }
+        None => {
+            ui.label(spec);
+        }
+    });
+}
+
 struct Loaded {
     circuit: Circuit,
     lib: Library,
@@ -272,6 +293,13 @@ impl ShortCircApp {
                     ui.label(v);
                     ui.end_row();
                 }
+                for (k, v) in [("color", &part.color), ("fill", &part.fill), ("label_color", &part.label_color)] {
+                    if let Some(spec) = v {
+                        ui.label(k);
+                        color_value(ui, spec);
+                        ui.end_row();
+                    }
+                }
             });
             if let Some(d) = def {
                 if !d.pins.is_empty() {
@@ -294,7 +322,7 @@ impl ShortCircApp {
     fn canvas(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-        let theme = Theme::new(self.dark);
+        let theme = Theme::for_circuit(self.dark, self.loaded.as_ref().map(|l| &l.circuit));
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, theme.bg);
         self.canvas_size = rect.size();

@@ -29,9 +29,10 @@ This document is the contract between the core crate, the app and any external t
 Fields:
 - `format` (required): must be `"short-circ/1"`.
 - `title` (optional string).
-- `parts[]`: `id` (unique string across parts and wires, used as reference designator, e.g. `R1`), `type` (component type name, see resolution), `at` `[x,y]` integer part origin, `rot` (0, 90, 180, 270 clockwise, default 0), `mirror` (bool, flips x before rotation, default false), `props` (free string map; `value`, `label`, anything). Optional `hidden_label` bool.
-- `wires[]`: `id` (unique), `pts` list of >= 2 integer points forming a polyline. Segments may be any direction but orthogonal is strongly preferred. Optional `color` string (`"#rrggbb"` or name).
-- `labels[]`: names a net. `at` must coincide with a pin position or lie on a wire. All points sharing a label name are the same net (like KiCad net labels).
+- `parts[]`: `id` (unique string across parts and wires, used as reference designator, e.g. `R1`), `type` (component type name, see resolution), `at` `[x,y]` integer part origin, `rot` (0, 90, 180, 270 clockwise, default 0), `mirror` (bool, flips x before rotation, default false), `props` (free string map; `value`, `label`, anything). Optional `hidden_label` bool. Optional colour specs (see Colours): `color` (outline of every shape without its own `stroke`), `fill` (fill of closed shapes without their own `fill`), `label_color` (the part's text).
+- `wires[]`: `id` (unique), `pts` list of >= 2 integer points forming a polyline. Segments may be any direction but orthogonal is strongly preferred. Optional `color` (colour spec, see Colours).
+- `labels[]`: names a net. `at` must coincide with a pin position or lie on a wire. All points sharing a label name are the same net (like KiCad net labels). Optional `color` (colour spec).
+- `theme` (optional object): circuit-wide colour defaults per kind of object: `background`, `grid`, `wire`, `part`, `label`, `pin`, `junction`, each an optional colour spec (see Colours).
 - `lib[]`: optional inline component definitions (same schema as `.part`) that take precedence over external ones.
 
 ## Component file: `*.part`
@@ -57,7 +58,7 @@ Fields:
 - `type`: unique lowercase name referenced by parts. `name`: display name.
 - `size`: `[w,h]` bounding box in grid units from the part origin (0,0) to (w,h). Used for overlap checks. Local coordinates may extend slightly outside; bbox is authoritative.
 - `pins[]`: `id` (unique within part), `at` integer `[x,y]` local, `dir` one of `left|right|up|down` (direction the pin leads out of the body; used for label placement), optional `name`.
-- `shapes[]`: drawn in order. Common optional fields: `stroke` (color, default theme foreground), `fill` (color or `"none"`, default none), `width` (stroke width in grid units, default 0.12).
+- `shapes[]`: drawn in order. Common optional fields: `stroke` (colour spec; default: the part's `color`, else the theme part colour), `fill` (colour spec or `"none"`; default: the part's `fill`, else none; only closed shapes `rect`, `circle`, `poly` are filled), `width` (stroke width in grid units, default 0.12). For `text` shapes the colour is `fill`, else `stroke`, else the part's `label_color`, else the theme part colour (a `"none"` in a text shape is ignored).
   - `{"k":"line","pts":[[x,y],...]}` polyline
   - `{"k":"rect","at":[x,y],"size":[w,h],"r":0}` optional corner radius
   - `{"k":"circle","at":[x,y],"r":1}`
@@ -82,6 +83,34 @@ A **point** is connected to everything else at the same integer coordinate. Two 
 5. Labels with the same name merge their nets.
 A net with zero pins is allowed but reported as a warning.
 
+## Colours
+A **colour spec** is a string, matched case-insensitively with surrounding whitespace ignored:
+- `#rgb`, `#rrggbb` or `#rrggbbaa` hex (`#rgb` doubles each digit; `aa` is opacity, `ff` = opaque), or
+- a preset name from the table below (`grey` is accepted as an alias of `gray`), or
+- `"none"`: draw nothing (no outline, no fill, no wire, ...), or
+- `"default"`: use the default for that kind of object (the next precedence level below).
+The empty string and anything else is not a colour (`bad-color` warning) and is treated like `"default"`.
+
+| name | hex | name | hex | name | hex |
+|---|---|---|---|---|---|
+| `black` | `#000000` | `white` | `#ffffff` | `gray` | `#808080` |
+| `silver` | `#c0c0c0` | `red` | `#d93025` | `orange` | `#f57c00` |
+| `yellow` | `#f2c200` | `green` | `#1e8e3e` | `lime` | `#84cc16` |
+| `cyan` | `#00acc1` | `blue` | `#1a73e8` | `navy` | `#1a237e` |
+| `purple` | `#8e24aa` | `magenta` | `#d81b9a` | `pink` | `#f48fb1` |
+| `brown` | `#8d5a2b` | `teal` | `#00897b` | `gold` | `#d4a017` |
+
+`short-circ.exe --list-colors` prints this table.
+
+**Precedence**, highest first. The first level that gives a colour (or `"none"`) wins:
+1. The object's own colour: `wire.color`, `label.color`.
+2. For shapes inside a part: the shape's own `stroke` / `fill` (text: `fill`, then `stroke`), then the part's `color` / `fill` / `label_color`. So a shape's own colour beats the part-level colour.
+3. `theme.<kind>` of the circuit, where kind is `wire`, `label`, `pin`, `junction`, `part` (outline and text of part shapes), `background`, `grid`.
+4. The built-in default of the active light or dark theme.
+Closed shapes have no fill unless level 1 or 2 gives one (there is no theme fill).
+
+Explicit colours (levels 1 to 3) are used exactly as written in both the viewer and SVG export; they are never inverted or adjusted for dark mode, so `black` on a dark background stays black. Only the built-in defaults follow the light/dark theme. Junction dots use `theme.junction` if set, otherwise the resolved colour of the first wire (file order) that touches the dot. A `background` of `none` leaves the SVG transparent (the viewer keeps its own background); a `grid` of `none` hides the viewer grid. Translucent colours (`#rrggbbaa`) are written to SVG as `#rrggbb` plus `fill-opacity` / `stroke-opacity`. SVG export and the viewer share one resolver, so they agree.
+
 ## Validation rules (ids used in reports)
 Severity `error` unless noted.
 | rule | meaning |
@@ -101,6 +130,7 @@ Severity `error` unless noted.
 | `part-overlap` | bounding boxes of two parts intersect with positive area |
 | `net-short` | two pins on the same net belong to a part pair that declares `props.nets` distinct, or two labels with different names join the same net |
 | `empty-net` (warning) | net with no pins |
+| `bad-color` (warning) | a colour spec (part `color`/`fill`/`label_color`, wire/label `color`, `theme.*`, a `lib` shape `stroke`/`fill`) is not a colour, `"none"` or `"default"`; `ids=[object id]` (`theme` for the theme, the type name for a `lib` shape), the message names the field and the value |
 
 ## Report format (CLI `--validate --json`)
 ```json
@@ -116,6 +146,7 @@ Exit code: 0 no errors (warnings allowed), 1 errors, 2 unreadable input.
 - `short-circ.exe --render file.circ out.svg [--dark]`
 - `short-circ.exe --import-svg in.svg out.part --type NAME [--pins "a:0,1;b:8,1"] [--scale PX_PER_UNIT]`
 - `short-circ.exe --list-parts` prints resolvable component types
+- `short-circ.exe --list-colors` prints the preset colour names with their hex codes
 The GUI never requires any of these tools, and nothing in this repo outside `.claude/skills/` refers to Claude.
 
 ## Clarifications from the reference implementation

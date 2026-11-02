@@ -28,9 +28,32 @@ pub struct Circuit {
     /// Inline component definitions; highest resolution priority.
     #[serde(default)]
     pub lib: Vec<PartDef>,
+    /// Circuit-wide colour defaults, see docs/FORMAT.md "Colours".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<Theme>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Circuit-wide colour overrides per object kind. Each value is a colour spec (`#rgb`,
+/// `#rrggbb`, `#rrggbbaa`, a preset name), `"none"` (draw nothing) or `"default"`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Theme {
+    #[serde(default)]
+    pub background: Option<String>,
+    #[serde(default)]
+    pub grid: Option<String>,
+    #[serde(default)]
+    pub wire: Option<String>,
+    #[serde(default)]
+    pub part: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub pin: Option<String>,
+    #[serde(default)]
+    pub junction: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Part {
     pub id: String,
     #[serde(rename = "type")]
@@ -44,9 +67,18 @@ pub struct Part {
     pub props: BTreeMap<String, String>,
     #[serde(default)]
     pub hidden_label: bool,
+    /// Stroke colour for every shape of this part without its own `stroke`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Fill colour for closed shapes of this part without their own `fill`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    /// Colour of the part's text shapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_color: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Wire {
     pub id: String,
     pub pts: Vec<Pt>,
@@ -54,10 +86,12 @@ pub struct Wire {
     pub color: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Label {
     pub at: Pt,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

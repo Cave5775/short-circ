@@ -2,6 +2,7 @@
 //! Modules are filled in by parallel work streams; see docs/FORMAT.md.
 
 pub mod builtin;
+pub mod color;
 pub mod model;
 pub mod netlist;
 pub mod resolve;

@@ -3,7 +3,8 @@
 //! Wire geometry uses exact integer arithmetic. Candidate wire pairs come from a spatial hash
 //! over segments (see `netlist::Geom`), so cost scales with local density, not wire count.
 
-use crate::model::{Circuit, Issue, Pt, Report, Severity, FORMAT};
+use crate::color::is_valid_color_spec;
+use crate::model::{Circuit, Issue, Pt, Report, Severity, Shape, FORMAT};
 use crate::netlist::{on_segment, sub, Netlist, Occ};
 use crate::resolve::Library;
 use crate::transform::world_bbox;
@@ -75,6 +76,61 @@ fn proper_crossing(a: Pt, b: Pt, c: Pt, d: Pt) -> Option<(Pt, bool)> {
     Some((p, exact))
 }
 
+/// `bad-color` (warning): every colour spec that is not a colour, "none" or "default".
+fn check_colors(circuit: &Circuit, issues: &mut Vec<Issue>) {
+    let mut bad = |id: &str, at: Option<Pt>, what: String, value: &Option<String>| {
+        if let Some(v) = value.as_deref().filter(|v| !is_valid_color_spec(v)) {
+            issues.push(issue(
+                "bad-color",
+                Severity::Warning,
+                vec![id.to_string()],
+                at,
+                format!(
+                    "{what} {v:?} is not a colour (use #rgb, #rrggbb, #rrggbbaa, a preset name, \"none\" or \"default\")"
+                ),
+            ));
+        }
+    };
+    for p in &circuit.parts {
+        bad(&p.id, Some(p.at), format!("part {} color", p.id), &p.color);
+        bad(&p.id, Some(p.at), format!("part {} fill", p.id), &p.fill);
+        bad(&p.id, Some(p.at), format!("part {} label_color", p.id), &p.label_color);
+    }
+    for w in &circuit.wires {
+        bad(&w.id, w.pts.first().copied(), format!("wire {} color", w.id), &w.color);
+    }
+    for l in &circuit.labels {
+        bad(&l.name, Some(l.at), format!("label {} color", l.name), &l.color);
+    }
+    if let Some(t) = &circuit.theme {
+        for (name, v) in [
+            ("background", &t.background),
+            ("grid", &t.grid),
+            ("wire", &t.wire),
+            ("part", &t.part),
+            ("label", &t.label),
+            ("pin", &t.pin),
+            ("junction", &t.junction),
+        ] {
+            bad("theme", None, format!("theme.{name}"), v);
+        }
+    }
+    for def in &circuit.lib {
+        for (i, s) in def.shapes.iter().enumerate() {
+            let st = match s {
+                Shape::Line { style, .. }
+                | Shape::Rect { style, .. }
+                | Shape::Circle { style, .. }
+                | Shape::Arc { style, .. }
+                | Shape::Poly { style, .. }
+                | Shape::Text { style, .. } => style,
+            };
+            bad(&def.ty, None, format!("lib part {} shape {} stroke", def.ty, i), &st.stroke);
+            bad(&def.ty, None, format!("lib part {} shape {} fill", def.ty, i), &st.fill);
+        }
+    }
+}
+
 pub fn validate(circuit: &Circuit, lib: &Library) -> Report {
     let mut issues: Vec<Issue> = Vec::new();
     let nl = Netlist::build(circuit, lib);
@@ -137,6 +193,8 @@ pub fn validate(circuit: &Circuit, lib: &Library) -> Report {
             ));
         }
     }
+
+    check_colors(circuit, &mut issues);
 
     // Per-wire checks: wire-diagonal, wire-degenerate.
     for (wi, pts) in geom.wire_pts.iter().enumerate() {
@@ -393,6 +451,43 @@ mod tests {
     }
 
     const HEAD: &str = r#""format":"short-circ/1""#;
+
+    #[test]
+    fn bad_colors_warn_on_every_object_kind() {
+        let r = run(&format!(
+            r##"{{{HEAD},"theme":{{"wire":"nope","background":"#123456"}},
+            "lib":[{{"type":"box","size":[2,2],"shapes":[{{"k":"rect","at":[0,0],"size":[2,2],"stroke":"bad1","fill":"none"}}]}}],
+            "parts":[{{"id":"P1","type":"box","at":[0,0],"color":"#12","fill":"red","label_color":"nonee"}}],
+            "wires":[{{"id":"w1","pts":[[5,0],[8,0]],"color":"reddish"}},{{"id":"w2","pts":[[5,2],[8,2]],"color":"default"}}],
+            "labels":[{{"at":[5,0],"name":"N","color":"#12345"}}]}}"##
+        ));
+        let warn = |ids: &[&str], needle: &str| {
+            r.issues.iter().any(|i| {
+                i.rule == "bad-color"
+                    && i.severity == Severity::Warning
+                    && i.ids.iter().map(|s| s.as_str()).eq(ids.iter().copied())
+                    && i.message.contains(needle)
+            })
+        };
+        assert!(warn(&["P1"], "part P1 color \"#12\""), "{:?}", r.issues);
+        assert!(warn(&["P1"], "label_color \"nonee\""));
+        assert!(!r.issues.iter().any(|i| i.message.contains("fill \"red\"")));
+        assert!(warn(&["w1"], "wire w1 color \"reddish\""));
+        assert!(warn(&["N"], "label N color"));
+        assert!(warn(&["theme"], "theme.wire \"nope\""));
+        assert!(warn(&["box"], "shape 0 stroke \"bad1\""));
+        assert_eq!(r.issues.iter().filter(|i| i.rule == "bad-color").count(), 6);
+        assert_eq!(r.errors, 0, "bad-color is only a warning");
+    }
+
+    #[test]
+    fn good_colors_do_not_warn() {
+        let r = run(&format!(
+            r##"{{{HEAD},"theme":{{"wire":"red","grid":"none","pin":"default","label":"#abc"}},
+            "wires":[{{"id":"w1","pts":[[5,0],[8,0]],"color":"#AABBCCDD"}},{{"id":"w2","pts":[[5,2],[8,2]],"color":"None"}}]}}"##
+        ));
+        assert!(!r.issues.iter().any(|i| i.rule == "bad-color"), "{:?}", r.issues);
+    }
 
     #[test]
     fn led_example_has_no_errors() {

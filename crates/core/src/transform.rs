@@ -42,7 +42,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn part(at: Pt, rot: i32, mirror: bool) -> Part {
-        Part { id: "P".into(), ty: "t".into(), at, rot, mirror, props: BTreeMap::new(), hidden_label: false }
+        Part { id: "P".into(), ty: "t".into(), at, rot, mirror, props: BTreeMap::new(), ..Part::default() }
     }
 
     #[test]

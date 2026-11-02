@@ -14,6 +14,7 @@ pub enum Command {
     Render { file: PathBuf, out: PathBuf, dark: bool },
     ImportSvg { input: PathBuf, out: PathBuf, ty: String, pins: PinSpec, scale: Option<f64> },
     ListParts,
+    ListColors,
     Help,
     Version,
 }
@@ -31,6 +32,7 @@ USAGE:
                                               SPEC is id:x,y entries separated by ; (grid units),
                                               PX is pixels per grid unit (default 10)
   short-circ --list-parts                     list available component types
+  short-circ --list-colors                    list preset colour names and hex codes
   short-circ --help | --version
 
 Viewer: drag to pan, wheel to zoom, F to fit, drop a .circ file onto the window to open it.
@@ -52,6 +54,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--help" | "-h" => return Ok(Command::Help),
             "--version" | "-V" => return Ok(Command::Version),
             "--list-parts" => set_mode(&mut mode, "list-parts")?,
+            "--list-colors" => set_mode(&mut mode, "list-colors")?,
             "--validate" => set_mode(&mut mode, "validate")?,
             "--render" => set_mode(&mut mode, "render")?,
             "--import-svg" => set_mode(&mut mode, "import-svg")?,
@@ -84,6 +87,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 return Err("--list-parts takes no other arguments".into());
             }
             Ok(Command::ListParts)
+        }
+        Some("list-colors") => {
+            if !positional.is_empty() || json || dark || import_flags {
+                return Err("--list-colors takes no other arguments".into());
+            }
+            Ok(Command::ListColors)
         }
         Some("validate") => {
             if dark {
@@ -201,6 +210,12 @@ pub fn run(cmd: Command) -> i32 {
             let lib = Library::load(&Circuit::default(), None);
             for t in lib.types() {
                 println!("{t}");
+            }
+            0
+        }
+        Command::ListColors => {
+            for (name, c) in short_circ_core::color::preset_names() {
+                println!("{name:<8} {}", c.to_hex());
             }
             0
         }
@@ -428,6 +443,9 @@ mod tests {
     #[test]
     fn misc_commands_and_errors() {
         assert_eq!(p(&["--list-parts"]).unwrap(), Command::ListParts);
+        assert_eq!(p(&["--list-colors"]).unwrap(), Command::ListColors);
+        assert!(p(&["--list-colors", "x.circ"]).is_err());
+        assert!(p(&["--list-colors", "--list-parts"]).is_err());
         assert_eq!(p(&["--help"]).unwrap(), Command::Help);
         assert_eq!(p(&["--version"]).unwrap(), Command::Version);
         assert!(p(&["--bogus"]).is_err());

@@ -2,6 +2,7 @@
 //! The math is kept free of any egui context so it can be unit tested.
 
 use eframe::egui::{self, Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, Vec2};
+use short_circ_core::color::{self, Palette, Rgba, Spec};
 use short_circ_core::transform::{pin_world, to_world, world_bbox};
 use short_circ_core::{Anchor, Circuit, Library, Part, PartDef, Pt, Shape as Sh, Style, Wire};
 
@@ -316,9 +317,12 @@ pub struct Theme {
     pub dark: bool,
     pub bg: Color32,
     pub fg: Color32,
+    /// Built-in wire and pin colours; drawing uses `short_circ_core::color::Palette` instead.
+    #[allow(dead_code)]
     pub wire: Color32,
     pub grid_minor: Color32,
     pub grid_major: Color32,
+    #[allow(dead_code)]
     pub pin: Color32,
     pub highlight: Color32,
     pub select: Color32,
@@ -358,54 +362,39 @@ impl Theme {
             }
         }
     }
-}
 
-/// Parse `#rgb`, `#rrggbb`, `#rrggbbaa` or a common color name.
-pub fn parse_color(s: &str) -> Option<Color32> {
-    let s = s.trim();
-    if let Some(hex) = s.strip_prefix('#') {
-        let v = |i: usize, n: usize| u8::from_str_radix(hex.get(i..i + n)?, 16).ok();
-        return match hex.len() {
-            3 => Some(Color32::from_rgb(v(0, 1)? * 17, v(1, 1)? * 17, v(2, 1)? * 17)),
-            6 => Some(Color32::from_rgb(v(0, 2)?, v(2, 2)?, v(4, 2)?)),
-            8 => Some(Color32::from_rgba_unmultiplied(v(0, 2)?, v(2, 2)?, v(4, 2)?, v(6, 2)?)),
-            _ => None,
-        };
-    }
-    let c = match s.to_ascii_lowercase().as_str() {
-        "black" => Color32::BLACK,
-        "white" => Color32::WHITE,
-        "red" => Color32::from_rgb(220, 40, 40),
-        "green" => Color32::from_rgb(30, 160, 60),
-        "blue" => Color32::from_rgb(50, 90, 230),
-        "yellow" => Color32::from_rgb(235, 200, 20),
-        "orange" => Color32::from_rgb(240, 140, 20),
-        "purple" => Color32::from_rgb(150, 70, 200),
-        "cyan" => Color32::from_rgb(20, 190, 210),
-        "magenta" => Color32::from_rgb(210, 40, 180),
-        "gray" | "grey" => Color32::from_rgb(130, 130, 130),
-        "brown" => Color32::from_rgb(140, 90, 40),
-        _ => return None,
-    };
-    Some(c)
-}
-
-/// Part color: an explicit color if given, else the theme foreground. Pure black on a dark
-/// theme and pure white on a light one are mapped to the foreground so they stay visible.
-fn resolve_stroke(style: &Style, theme: &Theme) -> Color32 {
-    match style.stroke.as_deref().and_then(parse_color) {
-        Some(c) if theme.dark && c == Color32::BLACK => theme.fg,
-        Some(c) if !theme.dark && c == Color32::WHITE => theme.fg,
-        Some(c) => c,
-        None => theme.fg,
+    /// Like `new`, with the circuit's `theme.background` and `theme.grid` applied. A background of
+    /// "none" keeps the viewer background; a grid of "none" hides the grid.
+    pub fn for_circuit(dark: bool, circuit: Option<&Circuit>) -> Self {
+        let mut t = Theme::new(dark);
+        let Some(c) = circuit.filter(|c| c.theme.is_some()) else { return t };
+        let pal = Palette::for_circuit(c, dark);
+        if let Some(bg) = pal.background {
+            t.bg = to_color32(bg);
+        }
+        match pal.grid {
+            Some(g) => {
+                let bg = pal.background.unwrap_or(Palette::builtin(dark).background.unwrap_or(g));
+                t.grid_major = to_color32(g);
+                t.grid_minor = to_color32(bg.mix(g, 0.45));
+            }
+            None => {
+                t.grid_major = Color32::TRANSPARENT;
+                t.grid_minor = Color32::TRANSPARENT;
+            }
+        }
+        t
     }
 }
 
-fn resolve_fill(style: &Style) -> Color32 {
-    match style.fill.as_deref() {
-        None | Some("none") => Color32::TRANSPARENT,
-        Some(s) => parse_color(s).unwrap_or(Color32::TRANSPARENT),
-    }
+/// Core colour to egui colour. Colours resolve in `short_circ_core::color`, shared with SVG export.
+pub fn to_color32(c: Rgba) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
+}
+
+/// Stroke of `width` in `c`, or no stroke when the colour resolved to "none".
+fn stroke_of(width: f32, c: Option<Rgba>) -> Stroke {
+    c.map_or(Stroke::NONE, |c| Stroke::new(width, to_color32(c)))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -474,10 +463,12 @@ pub fn draw_circuit(
     selected: Option<usize>,
 ) {
     let t = &d.theme;
+    let pal = Palette::for_circuit(circuit, t.dark);
     // Wires
     for w in &circuit.wires {
         let lit = hl.wires.iter().any(|x| x == &w.id);
-        let color = if lit { t.highlight } else { w.color.as_deref().and_then(parse_color).unwrap_or(t.wire) };
+        let color = if lit { Some(t.highlight) } else { color::wire_color(w, &pal).map(to_color32) };
+        let Some(color) = color else { continue };
         let width = (d.px(0.16)).max(1.5) * if lit { 1.7 } else { 1.0 };
         let pts: Vec<Pos2> = w.pts.iter().map(|p| d.pt([p[0] as f64, p[1] as f64])).collect();
         if pts.len() >= 2 {
@@ -487,7 +478,7 @@ pub fn draw_circuit(
     // Parts
     for (i, part) in circuit.parts.iter().enumerate() {
         match lib.get(&part.ty) {
-            Some(def) => draw_part(d, part, def),
+            Some(def) => draw_part(d, &pal, part, def),
             None => draw_unknown(d, part),
         }
         if selected == Some(i) {
@@ -498,8 +489,18 @@ pub fn draw_circuit(
     }
     // Junction dots
     let jr = d.px(0.28).max(2.5);
+    // Without per-wire colours every junction takes the palette colour (skips a scan per dot).
+    let uniform = circuit.wires.iter().all(|w| w.color.is_none());
     for j in junctions {
-        d.painter.circle_filled(d.pt([j[0] as f64, j[1] as f64]), jr, t.wire);
+        let c = match (uniform, pal.junction) {
+            (_, Spec::Color(c)) => Some(c),
+            (_, Spec::None) => None,
+            (true, Spec::Unset) => pal.wire,
+            (false, Spec::Unset) => color::junction_color(circuit, *j, &pal),
+        };
+        if let Some(c) = c {
+            d.painter.circle_filled(d.pt([j[0] as f64, j[1] as f64]), jr, to_color32(c));
+        }
     }
     // Pin markers
     for part in &circuit.parts {
@@ -510,12 +511,12 @@ pub fn draw_circuit(
             let lit = hl.pins.iter().any(|(p, n)| p == &part.id && n == &pin.id);
             if lit {
                 d.painter.circle_filled(c, (d.px(0.3)).max(4.0), t.highlight);
-            } else {
+            } else if let Some(pc) = pal.pin {
                 let h = d.px(0.12).max(2.0);
                 d.painter.rect_stroke(
                     Rect::from_center_size(c, Vec2::splat(h * 2.0)),
                     0.0,
-                    Stroke::new(1.0, t.pin),
+                    Stroke::new(1.0, to_color32(pc)),
                     egui::StrokeKind::Middle,
                 );
             }
@@ -523,8 +524,9 @@ pub fn draw_circuit(
     }
     // Labels
     for l in &circuit.labels {
+        let Some(c) = color::label_color(l, &pal) else { continue };
         let p = d.pt([l.at[0] as f64, l.at[1] as f64]);
-        draw_text(d, p + Vec2::new(d.px(0.2), -d.px(0.2)), &l.name, 0.9, Anchor::Start, t.wire);
+        draw_text(d, p + Vec2::new(d.px(0.2), -d.px(0.2)), &l.name, 0.9, Anchor::Start, to_color32(c));
     }
 }
 
@@ -541,15 +543,15 @@ fn draw_text(d: &DrawCtx, at: Pos2, text: &str, size_units: f64, anchor: Anchor,
     d.painter.text(at + Vec2::new(0.0, px * 0.15), align, text, FontId::proportional(px), color);
 }
 
-fn draw_poly(d: &DrawCtx, part: &Part, pts: &[[f64; 2]], closed: bool, style: &Style) {
+fn draw_poly(d: &DrawCtx, pal: &Palette, part: &Part, pts: &[[f64; 2]], closed: bool, style: &Style) {
     if pts.len() < 2 {
         return;
     }
     let sp: Vec<Pos2> = pts.iter().map(|p| d.pt(to_world(part, *p))).collect();
     let width = d.px(style.width.unwrap_or(0.12)).max(1.0);
-    let stroke = Stroke::new(width, resolve_stroke(style, &d.theme));
-    let fill = resolve_fill(style);
-    if closed && fill != Color32::TRANSPARENT {
+    let stroke = stroke_of(width, color::stroke_color(style, part, pal));
+    let fill = if closed { color::fill_color(style, part).map(to_color32) } else { None };
+    if let Some(fill) = fill {
         d.painter.add(Shape::convex_polygon(sp, fill, stroke));
     } else if closed {
         d.painter.add(Shape::closed_line(sp, stroke));
@@ -558,26 +560,29 @@ fn draw_poly(d: &DrawCtx, part: &Part, pts: &[[f64; 2]], closed: bool, style: &S
     }
 }
 
-fn draw_part(d: &DrawCtx, part: &Part, def: &PartDef) {
+fn draw_part(d: &DrawCtx, pal: &Palette, part: &Part, def: &PartDef) {
     for shape in &def.shapes {
         match shape {
-            Sh::Line { pts, style } => draw_poly(d, part, pts, false, style),
-            Sh::Poly { pts, style } => draw_poly(d, part, pts, true, style),
-            Sh::Rect { at, size, r, style } => draw_poly(d, part, &rect_outline(*at, *size, *r), true, style),
+            Sh::Line { pts, style } => draw_poly(d, pal, part, pts, false, style),
+            Sh::Poly { pts, style } => draw_poly(d, pal, part, pts, true, style),
+            Sh::Rect { at, size, r, style } => draw_poly(d, pal, part, &rect_outline(*at, *size, *r), true, style),
             Sh::Circle { at, r, style } => {
                 let c = d.pt(to_world(part, *at));
                 let width = d.px(style.width.unwrap_or(0.12)).max(1.0);
-                let stroke = Stroke::new(width, resolve_stroke(style, &d.theme));
-                d.painter.add(Shape::circle_filled(c, d.px(*r), resolve_fill(style)));
+                if let Some(fill) = color::fill_color(style, part) {
+                    d.painter.add(Shape::circle_filled(c, d.px(*r), to_color32(fill)));
+                }
+                let stroke = stroke_of(width, color::stroke_color(style, part, pal));
                 d.painter.add(Shape::circle_stroke(c, d.px(*r), stroke));
             }
             Sh::Arc { at, r, from, to, style } => {
                 let step = (60.0 / (d.px(*r).max(1.0) as f64).sqrt()).clamp(3.0, 15.0);
-                draw_poly(d, part, &arc_points(*at, *r, *from, *to, step), false, style);
+                draw_poly(d, pal, part, &arc_points(*at, *r, *from, *to, step), false, style);
             }
             Sh::Text { at, text, size, anchor, style } => {
+                let Some(c) = color::text_color(style, part, pal) else { continue };
                 let p = d.pt(to_world(part, *at));
-                draw_text(d, p, &expand_text(text, part), *size, *anchor, resolve_stroke(style, &d.theme));
+                draw_text(d, p, &expand_text(text, part), *size, *anchor, to_color32(c));
             }
         }
     }
@@ -640,7 +645,7 @@ mod tests {
             rot: 0,
             mirror: false,
             props: props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>(),
-            hidden_label: false,
+            ..Part::default()
         }
     }
 
@@ -755,11 +760,31 @@ mod tests {
 
     #[test]
     fn colors() {
-        assert_eq!(parse_color("#ff0000"), Some(Color32::from_rgb(255, 0, 0)));
-        assert_eq!(parse_color("#0f0"), Some(Color32::from_rgb(0, 255, 0)));
-        assert_eq!(parse_color("Black"), Some(Color32::BLACK));
+        use short_circ_core::color::parse_color;
+        assert_eq!(parse_color("#ff0000").map(to_color32), Some(Color32::from_rgb(255, 0, 0)));
+        assert_eq!(parse_color("#0f08").map(|c| c.a), None, "4 digit hex is not a form");
+        assert_eq!(parse_color("#00ff0080").map(to_color32), Some(Color32::from_rgba_unmultiplied(0, 255, 0, 128)));
+        assert_eq!(parse_color("Black").map(to_color32), Some(Color32::BLACK));
         assert_eq!(parse_color("nonsense"), None);
-        assert_eq!(parse_color("#12"), None);
+    }
+
+    #[test]
+    fn circuit_theme_overrides_background_and_grid() {
+        let plain = Theme::for_circuit(true, None);
+        assert_eq!(plain.bg, Theme::new(true).bg);
+        let mut c = Circuit {
+            theme: Some(short_circ_core::Theme {
+                background: Some("#102030".into()),
+                grid: Some("none".into()),
+                ..Default::default()
+            }),
+            ..Circuit::default()
+        };
+        let t = Theme::for_circuit(false, Some(&c));
+        assert_eq!(t.bg, Color32::from_rgb(0x10, 0x20, 0x30));
+        assert_eq!(t.grid_major, Color32::TRANSPARENT);
+        c.theme = Some(short_circ_core::Theme { background: Some("none".into()), ..Default::default() });
+        assert_eq!(Theme::for_circuit(false, Some(&c)).bg, Theme::new(false).bg, "none keeps the viewer background");
     }
 
     #[test]

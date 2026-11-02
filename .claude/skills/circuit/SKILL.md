@@ -19,6 +19,7 @@ CLI (exit codes: 0 ok, 1 errors found, 2 unreadable input):
 - `short-circ.exe --validate FILE.circ [--json]`
 - `short-circ.exe --render FILE.circ OUT.svg [--dark]`
 - `short-circ.exe --list-parts` (resolvable component types; `dipN` and `headerN` are generated on demand)
+- `short-circ.exe --list-colors` (preset colour names with hex codes)
 - `short-circ.exe --import-svg IN.svg OUT.part --type NAME [--pins "a:0,1;b:8,1"] [--scale PX_PER_UNIT]`
 
 ## Workflow
@@ -48,9 +49,23 @@ CLI (exit codes: 0 ok, 1 errors found, 2 unreadable input):
 ## Constraints the validator checks
 `wire-overlap` (collinear shared stretch), `wire-crossing` (warning: crossing without junction),
 `wire-through-pin`, `wire-diagonal`, `wire-degenerate`, `dangling-wire`, `unconnected-pin`, `part-overlap`,
-`net-short` (two label names on one net), `empty-net`, `duplicate-id`, `unknown-type`, `bad-rotation`, `schema`.
+`net-short` (two label names on one net), `empty-net`, `bad-color` (warning), `duplicate-id`, `unknown-type`,
+`bad-rotation`, `schema`.
 If the user states other constraints (e.g. max width, all grounds on one net), check them yourself by reading the
 JSON, and say which checks are the validator's and which are yours.
+
+## Colours
+Colours are optional; use them to make nets readable. A colour is a hex code (`#rgb`, `#rrggbb`, `#rrggbbaa`) or a
+preset name (`--list-colors`: black, white, gray, silver, red, orange, yellow, green, lime, cyan, blue, navy, purple,
+magenta, pink, brown, teal, gold); `"none"` draws nothing and `"default"` means the theme default.
+- Wires: `"color":"red"` per wire. Convention: power red, ground black (or gray, since black vanishes on a dark
+  background and explicit colours are never inverted), signals other distinct colours, one colour per net.
+- Parts: `"color"` (outline), `"fill"` (fill of closed shapes), `"label_color"` (text). Labels: `"color"`.
+- Circuit-wide: `"theme":{"background","grid","wire","part","label","pin","junction"}` sets defaults. If you set
+  `background`, also set `part`, `wire`, `label` and `pin` so the drawing stays legible in light and dark mode.
+- Precedence: the object's own colour, then a shape's own stroke/fill over the part's `color`/`fill`, then
+  `theme`, then the built-in default. A bad colour is a `bad-color` warning and falls back to the default.
+See `examples/colors.circ`.
 
 ## Custom components
 Create from shapes: write a `.part` file (see FORMAT.md). Primitives: line, rect, circle, arc, poly, text.

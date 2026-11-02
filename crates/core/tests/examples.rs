@@ -20,6 +20,21 @@ fn led_example_validates_without_errors() {
 }
 
 #[test]
+fn colors_example_validates_without_issues_and_renders_its_colours() {
+    let (c, lib) = load(include_str!("../../../examples/colors.circ"));
+    let r = validate(&c, &lib);
+    assert_eq!(r.errors, 0, "{:#?}", r.issues);
+    assert!(r.issues.is_empty(), "{:#?}", r.issues);
+    let svg = short_circ_core::svg::render_svg(&c, &lib, false);
+    for hex in ["#fff8e1", "#d93025", "#1a73e8", "#00897b", "#f57c00", "#6a1b9a", "#b71c1c", "#ffe0b2", "#8d5a2b"] {
+        assert!(svg.contains(hex), "{hex} missing from SVG");
+    }
+    // Dark and light differ only in defaults; the explicit theme/part colours are untouched.
+    let dark = short_circ_core::svg::render_svg(&c, &lib, true);
+    assert!(dark.contains("#1a73e8") && dark.contains("#fff8e1"));
+}
+
+#[test]
 fn bad_example_reports_the_deliberate_faults() {
     let (c, lib) = load(include_str!("../../../examples/bad.circ"));
     let r = validate(&c, &lib);

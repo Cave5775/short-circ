@@ -4,11 +4,15 @@
 //! are 10 px per unit, and the `viewBox` is the content bounding box plus a 2 unit margin
 //! snapped to whole units. Output is deterministic (file order, fixed number formatting).
 //!
+//! Colours come from `color` (the same resolver the viewer uses): explicit colours are written as
+//! normalised `#rrggbb` hex (plus `*-opacity` when not opaque), `"none"` omits the element.
+//!
 //! Drawing order: background, title, parts (each in a `<g id="REF">`), wires, junction dots,
 //! pin dots, net labels. Text stays upright whatever the part rotation; `start`/`end` anchors
 //! of a rotated or mirrored part are swapped when the text ends up on the other side of the
 //! part centre, so labels keep pointing away from the symbol.
 
+use crate::color::{self, Palette, Rgba};
 use crate::model::{Anchor, Circuit, Part, PartDef, Shape, Style};
 use crate::resolve::Library;
 use crate::svgimport;
@@ -21,35 +25,34 @@ const MARGIN: f64 = 2.0;
 const DEFAULT_WIDTH: f64 = 0.12;
 const WIRE_WIDTH: f64 = 0.15;
 
-struct Theme {
-    bg: &'static str,
-    fg: &'static str,
-    wire: &'static str,
-    pin: &'static str,
-    label: &'static str,
-    error: &'static str,
+/// Colour of the dashed placeholder for unknown part types.
+fn error_color(dark: bool) -> &'static str {
+    if dark {
+        "#ff5252"
+    } else {
+        "#d32f2f"
+    }
 }
 
-const LIGHT: Theme = Theme {
-    bg: "#ffffff",
-    fg: "#1c1c1c",
-    wire: "#1b7f3b",
-    pin: "#c0392b",
-    label: "#a04000",
-    error: "#d32f2f",
-};
-const DARK: Theme = Theme {
-    bg: "#1e1e1e",
-    fg: "#e8e8e8",
-    wire: "#5fd38d",
-    pin: "#ff7b72",
-    label: "#ffb86c",
-    error: "#ff5252",
-};
+/// `name="#rrggbb"` (plus `name-opacity` if translucent), or `name="none"`.
+fn attr(name: &str, c: Option<Rgba>) -> String {
+    match c {
+        None => format!("{name}=\"none\""),
+        Some(c) if c.a == 255 => format!("{name}=\"#{:02x}{:02x}{:02x}\"", c.r, c.g, c.b),
+        Some(c) => format!(
+            "{name}=\"#{:02x}{:02x}{:02x}\" {name}-opacity=\"{}\"",
+            c.r,
+            c.g,
+            c.b,
+            num(c.a as f64 / 255.0)
+        ),
+    }
+}
 
 /// Render the whole circuit as a standalone SVG document.
 pub fn render_svg(circuit: &Circuit, lib: &Library, dark: bool) -> String {
-    let th = if dark { &DARK } else { &LIGHT };
+    let pal = Palette::for_circuit(circuit, dark);
+    let base = Palette::builtin(dark);
     let mut bb = Bounds::new();
     let mut body = String::new();
 
@@ -58,12 +61,12 @@ pub fn render_svg(circuit: &Circuit, lib: &Library, dark: bool) -> String {
     for part in &circuit.parts {
         match lib.get(&part.ty) {
             Some(def) => {
-                render_part(&mut body, part, def, th, &mut bb);
+                render_part(&mut body, part, def, &pal, &mut bb);
                 for p in &def.pins {
                     pin_points.push(pin_world(part, p));
                 }
             }
-            None => render_unknown(&mut body, part, th, &mut bb),
+            None => render_unknown(&mut body, part, dark, &mut bb),
         }
     }
 
@@ -72,51 +75,60 @@ pub fn render_svg(circuit: &Circuit, lib: &Library, dark: bool) -> String {
         if w.pts.len() < 2 {
             continue;
         }
-        let pts: Vec<String> = w.pts.iter().map(|p| format!("{},{}", p[0], p[1])).collect();
-        let color = w.color.as_deref().map(esc).unwrap_or_else(|| th.wire.to_string());
-        let _ = writeln!(
-            body,
-            "<polyline id=\"{}\" class=\"wire\" points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
-            esc(&w.id),
-            pts.join(" "),
-            color,
-            num(WIRE_WIDTH)
-        );
         for p in &w.pts {
             bb.add([p[0] as f64, p[1] as f64]);
         }
+        let Some(color) = color::wire_color(w, &pal) else { continue };
+        let pts: Vec<String> = w.pts.iter().map(|p| format!("{},{}", p[0], p[1])).collect();
+        let _ = writeln!(
+            body,
+            "<polyline id=\"{}\" class=\"wire\" points=\"{}\" fill=\"none\" {} stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+            esc(&w.id),
+            pts.join(" "),
+            attr("stroke", Some(color)),
+            num(WIRE_WIDTH)
+        );
     }
 
     // Junction dots.
     for j in junctions(circuit, &pin_points) {
+        let Some(c) = color::junction_color(circuit, j, &pal) else { continue };
         let _ = writeln!(
             body,
-            "<circle class=\"junction\" cx=\"{}\" cy=\"{}\" r=\"0.3\" fill=\"{}\"/>",
-            j[0], j[1], th.wire
+            "<circle class=\"junction\" cx=\"{}\" cy=\"{}\" r=\"0.3\" {}/>",
+            j[0],
+            j[1],
+            attr("fill", Some(c))
         );
     }
 
     // Pin dots.
     for p in &pin_points {
-        let _ = writeln!(
-            body,
-            "<circle class=\"pin\" cx=\"{}\" cy=\"{}\" r=\"0.18\" fill=\"{}\"/>",
-            p[0], p[1], th.pin
-        );
+        if pal.pin.is_some() {
+            let _ = writeln!(
+                body,
+                "<circle class=\"pin\" cx=\"{}\" cy=\"{}\" r=\"0.18\" {}/>",
+                p[0],
+                p[1],
+                attr("fill", pal.pin)
+            );
+        }
         bb.add([p[0] as f64, p[1] as f64]);
     }
 
     // Net labels.
     for l in &circuit.labels {
         let at = [l.at[0] as f64 + 0.3, l.at[1] as f64 - 0.3];
-        let _ = writeln!(
-            body,
-            "<text class=\"label\" x=\"{}\" y=\"{}\" font-size=\"0.9\" font-weight=\"bold\" fill=\"{}\">{}</text>",
-            num(at[0]),
-            num(at[1]),
-            th.label,
-            esc(&l.name)
-        );
+        if let Some(c) = color::label_color(l, &pal) {
+            let _ = writeln!(
+                body,
+                "<text class=\"label\" x=\"{}\" y=\"{}\" font-size=\"0.9\" font-weight=\"bold\" {}>{}</text>",
+                num(at[0]),
+                num(at[1]),
+                attr("fill", Some(c)),
+                esc(&l.name)
+            );
+        }
         bb.add([l.at[0] as f64, l.at[1] as f64]);
         bb.add_text(at, &l.name, 0.9, Anchor::Start);
     }
@@ -131,10 +143,10 @@ pub fn render_svg(circuit: &Circuit, lib: &Library, dark: bool) -> String {
         let at = [bb.min[0], bb.min[1] - 1.2];
         let _ = writeln!(
             head,
-            "<text class=\"title\" x=\"{}\" y=\"{}\" font-size=\"1.4\" font-weight=\"bold\" fill=\"{}\">{}</text>",
+            "<text class=\"title\" x=\"{}\" y=\"{}\" font-size=\"1.4\" font-weight=\"bold\" {}>{}</text>",
             num(at[0]),
             num(at[1]),
-            th.fg,
+            attr("fill", pal.part.or(base.part)),
             esc(t)
         );
         bb.add_text(at, t, 1.4, Anchor::Start);
@@ -159,15 +171,17 @@ pub fn render_svg(circuit: &Circuit, lib: &Library, dark: bool) -> String {
     if let Some(t) = circuit.title.as_deref().filter(|t| !t.trim().is_empty()) {
         let _ = writeln!(out, "<title>{}</title>", esc(t));
     }
-    let _ = writeln!(
-        out,
-        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"/>",
-        num(vx),
-        num(vy),
-        num(vw),
-        num(vh),
-        th.bg
-    );
+    if let Some(bg) = pal.background {
+        let _ = writeln!(
+            out,
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" {}/>",
+            num(vx),
+            num(vy),
+            num(vw),
+            num(vh),
+            attr("fill", Some(bg))
+        );
+    }
     out.push_str(&head);
     out.push_str(&body);
     out.push_str("</svg>\n");
@@ -238,31 +252,13 @@ fn esc(s: &str) -> String {
     o
 }
 
-fn is_black(c: &str) -> bool {
-    matches!(c.trim().to_ascii_lowercase().as_str(), "black" | "#000" | "#000000")
-}
-
-fn stroke_attr(st: &Style, th: &Theme) -> String {
-    match st.stroke.as_deref() {
-        None => th.fg.to_string(),
-        Some(c) if is_black(c) => th.fg.to_string(),
-        Some(c) => esc(c.trim()),
-    }
-}
-
-fn fill_attr(st: &Style, th: &Theme) -> String {
-    match st.fill.as_deref() {
-        None => "none".to_string(),
-        Some(c) if is_black(c) => th.fg.to_string(),
-        Some(c) => esc(c.trim()),
-    }
-}
-
-fn paint(st: &Style, th: &Theme) -> String {
+/// Presentation attributes of a shape of `part`. `closed` shapes may be filled.
+fn paint(st: &Style, part: &Part, pal: &Palette, closed: bool) -> String {
+    let fill = if closed { color::fill_color(st, part) } else { None };
     format!(
-        "fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"",
-        fill_attr(st, th),
-        stroke_attr(st, th),
+        "{} {} stroke-width=\"{}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"",
+        attr("fill", fill),
+        attr("stroke", color::stroke_color(st, part, pal)),
         num(st.width.unwrap_or(DEFAULT_WIDTH))
     )
 }
@@ -307,7 +303,7 @@ fn angle_in_sweep(from: f64, delta: f64, theta: f64) -> bool {
     (theta - from).rem_euclid(360.0) <= delta
 }
 
-fn render_part(out: &mut String, part: &Part, def: &PartDef, th: &Theme, bb: &mut Bounds) {
+fn render_part(out: &mut String, part: &Part, def: &PartDef, pal: &Palette, bb: &mut Bounds) {
     let _ = writeln!(out, "<g id=\"{}\" class=\"part\" data-type=\"{}\">", esc(&part.id), esc(&part.ty));
     let (lo, hi) = world_bbox(part, def);
     bb.add(lo);
@@ -333,10 +329,9 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, th: &Theme, bb: &mu
                 w.iter().for_each(|p| bb.add(*p));
                 let list: Vec<String> = w.iter().map(|p| format!("{},{}", num(p[0]), num(p[1]))).collect();
                 if matches!(s, Shape::Poly { .. }) {
-                    let _ = writeln!(out, "<polygon points=\"{}\" {}/>", list.join(" "), paint(style, th));
+                    let _ = writeln!(out, "<polygon points=\"{}\" {}/>", list.join(" "), paint(style, part, pal, true));
                 } else {
-                    let st = Style { fill: None, ..style.clone() };
-                    let _ = writeln!(out, "<polyline points=\"{}\" {}/>", list.join(" "), paint(&st, th));
+                    let _ = writeln!(out, "<polyline points=\"{}\" {}/>", list.join(" "), paint(style, part, pal, false));
                 }
             }
             Shape::Rect { at, size, r, style } => {
@@ -354,7 +349,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, th: &Theme, bb: &mu
                     num(w),
                     num(h),
                     rr,
-                    paint(style, th)
+                    paint(style, part, pal, true)
                 );
             }
             Shape::Circle { at, r, style } => {
@@ -367,7 +362,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, th: &Theme, bb: &mu
                     num(c[0]),
                     num(c[1]),
                     num(*r),
-                    paint(style, th)
+                    paint(style, part, pal, true)
                 );
             }
             Shape::Arc { at, r, from, to, style } => {
@@ -386,7 +381,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, th: &Theme, bb: &mu
                         num(c[0]),
                         num(c[1]),
                         num(*r),
-                        paint(style, th)
+                        paint(style, part, pal, false)
                     );
                     continue;
                 }
@@ -404,7 +399,6 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, th: &Theme, bb: &mu
                 }
                 let large = if delta > 180.0 { 1 } else { 0 };
                 let sweep = if part.mirror { 0 } else { 1 };
-                let st = Style { fill: None, ..style.clone() };
                 let _ = writeln!(
                     out,
                     "<path d=\"M{} {} A{} {} 0 {} {} {} {}\" {}/>",
@@ -416,7 +410,7 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, th: &Theme, bb: &mu
                     sweep,
                     num(b[0]),
                     num(b[1]),
-                    paint(&st, th)
+                    paint(style, part, pal, false)
                 );
             }
             Shape::Text { at, text, size, anchor, style } => {
@@ -436,19 +430,15 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, th: &Theme, bb: &mu
                     };
                 }
                 bb.add_text(p, shown, *size, anchor);
-                let fill = match style.fill.as_deref() {
-                    None | Some("none") => th.fg.to_string(),
-                    Some(c) if is_black(c) => th.fg.to_string(),
-                    Some(c) => esc(c.trim()),
-                };
+                let Some(fill) = color::text_color(style, part, pal) else { continue };
                 let _ = writeln!(
                     out,
-                    "<text x=\"{}\" y=\"{}\" font-size=\"{}\" text-anchor=\"{}\" fill=\"{}\">{}</text>",
+                    "<text x=\"{}\" y=\"{}\" font-size=\"{}\" text-anchor=\"{}\" {}>{}</text>",
                     num(p[0]),
                     num(p[1]),
                     num(*size),
                     svg_anchor(anchor),
-                    fill,
+                    attr("fill", Some(fill)),
                     esc(shown)
                 );
             }
@@ -457,7 +447,8 @@ fn render_part(out: &mut String, part: &Part, def: &PartDef, th: &Theme, bb: &mu
     out.push_str("</g>\n");
 }
 
-fn render_unknown(out: &mut String, part: &Part, th: &Theme, bb: &mut Bounds) {
+fn render_unknown(out: &mut String, part: &Part, dark: bool, bb: &mut Bounds) {
+    let err = error_color(dark);
     let (x, y) = (part.at[0] as f64, part.at[1] as f64);
     let label = format!("{}: {}?", part.id, part.ty);
     let _ = writeln!(out, "<g id=\"{}\" class=\"part unknown\" data-type=\"{}\">", esc(&part.id), esc(&part.ty));
@@ -466,14 +457,14 @@ fn render_unknown(out: &mut String, part: &Part, th: &Theme, bb: &mut Bounds) {
         "<rect x=\"{}\" y=\"{}\" width=\"4\" height=\"2\" fill=\"none\" stroke=\"{}\" stroke-width=\"0.15\" stroke-dasharray=\"0.4 0.3\"/>",
         num(x),
         num(y),
-        th.error
+        err
     );
     let _ = writeln!(
         out,
         "<text x=\"{}\" y=\"{}\" font-size=\"0.8\" text-anchor=\"middle\" fill=\"{}\">{}</text>",
         num(x + 2.0),
         num(y + 1.3),
-        th.error,
+        err,
         esc(&label)
     );
     out.push_str("</g>\n");
@@ -597,7 +588,7 @@ mod tests {
                 rot: [0, 90, 180, 270][i % 4],
                 mirror: i % 3 == 0,
                 props: [("value".to_string(), "v<&>".to_string())].into(),
-                hidden_label: false,
+                ..Part::default()
             });
         }
         let svg = render_svg(&c, &lib, true);
@@ -659,11 +650,75 @@ mod tests {
             rot: 0,
             mirror: false,
             props: Default::default(),
-            hidden_label: false,
+            ..Part::default()
         };
         p.props.insert("tol".into(), "1%".into());
         assert_eq!(expand("{ref} {value}|{prop:tol}|{prop:zz}|{x}|{", &p, false), "R7 |1%||{x}|{");
         assert_eq!(expand("{ref}!", &p, true), "!");
+    }
+
+    const COLORED: &str = r##"{"format":"short-circ/1","title":"T",
+        "theme":{"background":"#102030","wire":"teal","pin":"#abcdef","label":"gold","junction":"pink"},
+        "lib":[{"type":"box","size":[4,2],"pins":[{"id":"a","at":[0,1]}],"shapes":[
+            {"k":"rect","at":[0,0],"size":[4,2]},
+            {"k":"circle","at":[2,1],"r":0.5,"stroke":"#00ff00","fill":"#0000ff"},
+            {"k":"line","pts":[[0,1],[1,1]]},
+            {"k":"text","at":[2,3],"text":"{ref}","size":1}]}],
+        "parts":[{"id":"P1","type":"box","at":[0,0],"color":"red","fill":"yellow","label_color":"#123456"},
+                 {"id":"P2","type":"box","at":[10,0]}],
+        "wires":[{"id":"w1","pts":[[4,1],[8,1]],"color":"#ff8800"},{"id":"w2","pts":[[6,1],[6,5]]},
+                 {"id":"w3","pts":[[20,1],[24,1]],"color":"none"}],
+        "labels":[{"at":[8,1],"name":"A","color":"#010203"},{"at":[6,5],"name":"B"}]}"##;
+
+    #[test]
+    fn explicit_colours_reach_the_svg_and_follow_precedence() {
+        let svg = render(COLORED, false);
+        assert_balanced(&svg);
+        // Theme background, normalised hex.
+        assert!(svg.contains("height=\"") && svg.contains("fill=\"#102030\"/>"), "{svg}");
+        // Wires: own colour, theme colour, and "none" omits the element.
+        assert!(svg.contains("id=\"w1\" class=\"wire\" points=\"4,1 8,1\" fill=\"none\" stroke=\"#ff8800\""));
+        assert!(svg.contains("id=\"w2\" class=\"wire\" points=\"6,1 6,5\" fill=\"none\" stroke=\"#00897b\""));
+        assert!(!svg.contains("id=\"w3\""));
+        // Part P1: part.color / part.fill apply to the rect; the circle keeps its own colours.
+        let p1 = &svg[svg.find("<g id=\"P1\"").unwrap()..svg.find("<g id=\"P2\"").unwrap()];
+        assert!(p1.contains("<rect") && p1.contains("fill=\"#f2c200\" stroke=\"#d93025\""));
+        assert!(p1.contains("<circle cx=\"2\" cy=\"1\" r=\"0.5\" fill=\"#0000ff\" stroke=\"#00ff00\""));
+        assert!(p1.contains("<polyline") && p1.contains("fill=\"none\" stroke=\"#d93025\""));
+        assert!(p1.contains("fill=\"#123456\">P1</text>"));
+        // Part P2 has no colours: unfilled rect in the light default part colour, text likewise.
+        let p2 = &svg[svg.find("<g id=\"P2\"").unwrap()..];
+        assert!(p2.contains("<rect") && p2.contains("fill=\"none\" stroke=\"#1e2024\""));
+        assert!(p2.contains("fill=\"#1e2024\">P2</text>"));
+        // Pins, labels, junction dots.
+        assert!(svg.contains("class=\"pin\" cx=\"0\" cy=\"1\" r=\"0.18\" fill=\"#abcdef\""));
+        assert!(svg.contains("class=\"label\"") && svg.contains("fill=\"#010203\">A</text>"));
+        assert!(svg.contains("fill=\"#d4a017\">B</text>"), "theme.label gold");
+        assert!(svg.contains("class=\"junction\" cx=\"6\" cy=\"1\" r=\"0.3\" fill=\"#f48fb1\""), "theme.junction pink");
+    }
+
+    #[test]
+    fn junction_takes_wire_colour_and_none_hides_things() {
+        let t = r##"{"format":"short-circ/1","theme":{"background":"none","pin":"none"},"wires":[
+            {"id":"a","pts":[[0,0],[10,0]],"color":"#ff0000"},{"id":"b","pts":[[5,0],[5,5]]}]}"##;
+        let svg = render(t, false);
+        assert!(svg.contains("class=\"junction\" cx=\"5\" cy=\"0\" r=\"0.3\" fill=\"#ff0000\""));
+        assert!(!svg.contains("<rect"), "background none: no rect");
+        assert!(!svg.contains("class=\"pin\""));
+    }
+
+    #[test]
+    fn explicit_black_is_not_inverted_in_dark_mode() {
+        let t = r##"{"format":"short-circ/1","wires":[{"id":"a","pts":[[0,0],[4,0]],"color":"black"}]}"##;
+        assert!(render(t, true).contains("stroke=\"#000000\""));
+        assert!(render(t, false).contains("stroke=\"#000000\""));
+    }
+
+    #[test]
+    fn translucent_colour_uses_opacity_attribute() {
+        let t = r##"{"format":"short-circ/1","wires":[{"id":"a","pts":[[0,0],[4,0]],"color":"#ff000080"}]}"##;
+        let svg = render(t, false);
+        assert!(svg.contains("stroke=\"#ff0000\" stroke-opacity=\"0.502\""), "{svg}");
     }
 
     #[test]
