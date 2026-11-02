@@ -1,9 +1,13 @@
 //! short-circ core: format model, netlist, validation, SVG export. No GUI dependencies.
 //! Modules are filled in by parallel work streams; see docs/FORMAT.md.
 
+pub mod builtin;
 pub mod model;
+pub mod resolve;
+pub mod transform;
 
 pub use model::*;
+pub use resolve::Library;
 
 /// Parse a `.circ` JSON document.
 pub fn parse_circuit(src: &str) -> Result<Circuit, serde_json::Error> {
