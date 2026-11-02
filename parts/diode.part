@@ -1,0 +1,19 @@
+{
+  "format": "short-circ/1",
+  "type": "diode",
+  "name": "Diode",
+  "category": "semiconductor",
+  "size": [4, 2],
+  "pins": [
+    {"id": "anode", "at": [0, 1], "dir": "left"},
+    {"id": "cathode", "at": [4, 1], "dir": "right"}
+  ],
+  "shapes": [
+    {"k": "line", "pts": [[0, 1], [1.5, 1]]},
+    {"k": "poly", "pts": [[1.5, 0], [1.5, 2], [2.8, 1]]},
+    {"k": "line", "pts": [[2.8, 0], [2.8, 2]]},
+    {"k": "line", "pts": [[2.8, 1], [4, 1]]},
+    {"k": "text", "at": [2.2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+    {"k": "text", "at": [2.2, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+  ]
+}

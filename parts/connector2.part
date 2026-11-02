@@ -1,0 +1,20 @@
+{
+  "format": "short-circ/1",
+  "type": "connector2",
+  "name": "Connector, 2 pins",
+  "category": "connector",
+  "size": [3, 4],
+  "pins": [
+    {"id": "1", "at": [0, 1], "dir": "left"},
+    {"id": "2", "at": [0, 3], "dir": "left"}
+  ],
+  "shapes": [
+    {"k": "rect", "at": [1, 0], "size": [2, 4]},
+    {"k": "line", "pts": [[0, 1], [2, 1]]},
+    {"k": "line", "pts": [[0, 3], [2, 3]]},
+    {"k": "circle", "at": [2, 1], "r": 0.35},
+    {"k": "circle", "at": [2, 3], "r": 0.35},
+    {"k": "text", "at": [2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+    {"k": "text", "at": [2, 5.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+  ]
+}

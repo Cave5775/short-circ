@@ -4,6 +4,8 @@
 pub mod builtin;
 pub mod model;
 pub mod resolve;
+pub mod svg;
+pub mod svgimport;
 pub mod transform;
 
 pub use model::*;

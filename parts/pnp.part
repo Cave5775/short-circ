@@ -1,0 +1,22 @@
+{
+  "format": "short-circ/1",
+  "type": "pnp",
+  "name": "PNP transistor",
+  "category": "semiconductor",
+  "size": [5, 6],
+  "pins": [
+    {"id": "base", "at": [0, 3], "dir": "left"},
+    {"id": "collector", "at": [4, 6], "dir": "down"},
+    {"id": "emitter", "at": [4, 0], "dir": "up"}
+  ],
+  "shapes": [
+    {"k": "circle", "at": [2.5, 3], "r": 2.5},
+    {"k": "line", "pts": [[0, 3], [2, 3]]},
+    {"k": "line", "pts": [[2, 1.5], [2, 4.5]], "width": 0.25},
+    {"k": "line", "pts": [[4, 6], [4, 5], [2, 3.8]]},
+    {"k": "line", "pts": [[2, 2.2], [4, 1], [4, 0]]},
+    {"k": "poly", "pts": [[2.2, 2.08], [2.88, 1.27], [3.24, 1.87]]},
+    {"k": "text", "at": [5.4, 2.6], "text": "{ref}", "size": 0.9, "anchor": "start"},
+    {"k": "text", "at": [5.4, 3.8], "text": "{value}", "size": 0.9, "anchor": "start"}
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "format": "short-circ/1",
+  "type": "inductor",
+  "name": "Inductor",
+  "category": "passive",
+  "size": [8, 2],
+  "pins": [
+    {"id": "a", "at": [0, 1], "dir": "left"},
+    {"id": "b", "at": [8, 1], "dir": "right"}
+  ],
+  "shapes": [
+    {"k": "line", "pts": [[0, 1], [1, 1]]},
+    {"k": "arc", "at": [1.75, 1], "r": 0.75, "from": 180, "to": 360},
+    {"k": "arc", "at": [3.25, 1], "r": 0.75, "from": 180, "to": 360},
+    {"k": "arc", "at": [4.75, 1], "r": 0.75, "from": 180, "to": 360},
+    {"k": "arc", "at": [6.25, 1], "r": 0.75, "from": 180, "to": 360},
+    {"k": "line", "pts": [[7, 1], [8, 1]]},
+    {"k": "text", "at": [4, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+    {"k": "text", "at": [4, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+  ]
+}

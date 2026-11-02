@@ -1,0 +1,21 @@
+{
+  "format": "short-circ/1",
+  "type": "potentiometer",
+  "name": "Potentiometer",
+  "category": "passive",
+  "size": [8, 3],
+  "pins": [
+    {"id": "a", "at": [0, 2], "dir": "left"},
+    {"id": "b", "at": [8, 2], "dir": "right"},
+    {"id": "wiper", "at": [4, 0], "dir": "up"}
+  ],
+  "shapes": [
+    {"k": "line", "pts": [[0, 2], [2, 2]]},
+    {"k": "rect", "at": [2, 1], "size": [4, 2]},
+    {"k": "line", "pts": [[6, 2], [8, 2]]},
+    {"k": "line", "pts": [[4, 0], [4, 1]]},
+    {"k": "poly", "pts": [[3.6, 0.4], [4.4, 0.4], [4, 1]]},
+    {"k": "text", "at": [4.8, 0.6], "text": "{ref}", "size": 0.9, "anchor": "start"},
+    {"k": "text", "at": [4, 4.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+  ]
+}
