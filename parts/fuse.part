@@ -1,19 +1,33 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "fuse",
   "name": "Fuse",
   "category": "passive",
-  "size": [6, 2],
   "pins": [
-    {"id": "a", "at": [0, 1], "dir": "left"},
-    {"id": "b", "at": [6, 1], "dir": "right"}
+    {"id": "a"},
+    {"id": "b"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[0, 1], [1, 1]]},
-    {"k": "rect", "at": [1, 0.4], "size": [4, 1.2]},
-    {"k": "line", "pts": [[1, 1], [5, 1]]},
-    {"k": "line", "pts": [[5, 1], [6, 1]]},
-    {"k": "text", "at": [3, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
-    {"k": "text", "at": [3, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
-  ]
+  "schematic": {
+    "size": [6, 2],
+    "pins": {
+      "a": {"at": [0, 1], "dir": "left"},
+      "b": {"at": [6, 1], "dir": "right"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[0, 1], [1, 1]]},
+      {"k": "rect", "at": [1, 0.4], "size": [4, 1.2]},
+      {"k": "line", "pts": [[1, 1], [5, 1]]},
+      {"k": "line", "pts": [[5, 1], [6, 1]]},
+      {"k": "text", "at": [3, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+      {"k": "text", "at": [3, 3.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+    ]
+  },
+  "breadboard": {
+    "size": [6, 2],
+    "pins": {
+      "a": {"at": [0, 1]},
+      "b": {"at": [6, 1]}
+    },
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 60 20'><line x1='0' y1='10' x2='15' y2='10' stroke='#b0b0b0' stroke-width='1.6'/><line x1='45' y1='10' x2='60' y2='10' stroke='#b0b0b0' stroke-width='1.6'/><rect x='14' y='4' width='32' height='12' fill='#e6f2f7' rx='2' stroke='#90a4ae' stroke-width='1'/><rect x='14' y='4' width='5' height='12' fill='#c0c0c0' stroke='#808080' stroke-width='1'/><rect x='41' y='4' width='5' height='12' fill='#c0c0c0' stroke='#808080' stroke-width='1'/><line x1='19' y1='10' x2='41' y2='10' stroke='#6d6d6d' stroke-width='0.8'/></svg>"
+  }
 }

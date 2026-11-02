@@ -1,26 +1,49 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "opamp",
   "name": "Op-amp",
   "category": "ic",
-  "size": [8, 6],
   "pins": [
-    {"id": "in-", "at": [0, 1], "dir": "left", "name": "IN-"},
-    {"id": "in+", "at": [0, 5], "dir": "left", "name": "IN+"},
-    {"id": "out", "at": [8, 3], "dir": "right", "name": "OUT"},
-    {"id": "v+", "at": [4, 0], "dir": "up", "name": "V+"},
-    {"id": "v-", "at": [4, 6], "dir": "down", "name": "V-"}
+    {"id": "in-", "name": "IN-"},
+    {"id": "in+", "name": "IN+"},
+    {"id": "out", "name": "OUT"},
+    {"id": "v+", "name": "V+"},
+    {"id": "v-", "name": "V-"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[0, 1], [1, 1]]},
-    {"k": "line", "pts": [[0, 5], [1, 5]]},
-    {"k": "poly", "pts": [[1, 0], [1, 6], [7, 3]]},
-    {"k": "line", "pts": [[7, 3], [8, 3]]},
-    {"k": "line", "pts": [[4, 0], [4, 1.5]]},
-    {"k": "line", "pts": [[4, 6], [4, 4.5]]},
-    {"k": "text", "at": [1.4, 1.35], "text": "-", "size": 0.9, "anchor": "start"},
-    {"k": "text", "at": [1.4, 5.35], "text": "+", "size": 0.9, "anchor": "start"},
-    {"k": "text", "at": [2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
-    {"k": "text", "at": [2, 7.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
-  ]
+  "schematic": {
+    "size": [8, 6],
+    "pins": {
+      "in+": {"at": [0, 5], "dir": "left"},
+      "in-": {"at": [0, 1], "dir": "left"},
+      "out": {"at": [8, 3], "dir": "right"},
+      "v+": {"at": [4, 0], "dir": "up"},
+      "v-": {"at": [4, 6], "dir": "down"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[0, 1], [1, 1]]},
+      {"k": "line", "pts": [[0, 5], [1, 5]]},
+      {"k": "poly", "pts": [[1, 0], [1, 6], [7, 3]]},
+      {"k": "line", "pts": [[7, 3], [8, 3]]},
+      {"k": "line", "pts": [[4, 0], [4, 1.5]]},
+      {"k": "line", "pts": [[4, 6], [4, 4.5]]},
+      {"k": "text", "at": [1.4, 1.35], "text": "-", "size": 0.9, "anchor": "start"},
+      {"k": "text", "at": [1.4, 5.35], "text": "+", "size": 0.9, "anchor": "start"},
+      {"k": "text", "at": [2, -0.6], "text": "{ref}", "size": 0.9, "anchor": "middle"},
+      {"k": "text", "at": [2, 7.1], "text": "{value}", "size": 0.9, "anchor": "middle"}
+    ]
+  },
+  "breadboard": {
+    "size": [6, 3],
+    "pins": {
+      "in+": {"at": [3, 3]},
+      "in-": {"at": [2, 3]},
+      "out": {"at": [3, 0]},
+      "v+": {"at": [2, 0]},
+      "v-": {"at": [4, 3]}
+    },
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 60 30'><rect x='8' y='25' width='4' height='5' fill='#b0b0b0'/><rect x='8' y='0' width='4' height='5' fill='#b0b0b0'/><rect x='18' y='25' width='4' height='5' fill='#b0b0b0'/><rect x='18' y='0' width='4' height='5' fill='#b0b0b0'/><rect x='28' y='25' width='4' height='5' fill='#b0b0b0'/><rect x='28' y='0' width='4' height='5' fill='#b0b0b0'/><rect x='38' y='25' width='4' height='5' fill='#b0b0b0'/><rect x='38' y='0' width='4' height='5' fill='#b0b0b0'/><path d='M4 5 H46 V25 H4 V18 A3 3 0 0 0 4 12 Z' fill='#212121' stroke='#000' stroke-width='1'/><circle cx='12' cy='21.5' r='1.3' fill='#6e6e6e'/><text x='27.0' y='17' font-family='sans-serif' font-size='5.5' fill='#9e9e9e' text-anchor='middle'>OPAMP</text></svg>"
+  },
+  "meta": {
+    "pinout": "DIP-8, notch left, pin 1 bottom left: 2 in-, 3 in+, 4 v-, 6 out, 7 v+; pins 1, 5 and 8 are not modelled"
+  }
 }

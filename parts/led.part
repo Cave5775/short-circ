@@ -1,20 +1,37 @@
 {
-  "format": "short-circ/1",
+  "format": "short-circ/2",
   "type": "led",
   "name": "LED",
   "category": "semiconductor",
-  "size": [4, 2],
   "pins": [
-    {"id": "anode", "at": [0, 1], "dir": "left"},
-    {"id": "cathode", "at": [4, 1], "dir": "right"}
+    {"id": "anode"},
+    {"id": "cathode"}
   ],
-  "shapes": [
-    {"k": "line", "pts": [[0, 1], [1.5, 1]]},
-    {"k": "poly", "pts": [[1.5, 0], [1.5, 2], [2.8, 1]]},
-    {"k": "line", "pts": [[2.8, 0], [2.8, 2]]},
-    {"k": "line", "pts": [[2.8, 1], [4, 1]]},
-    {"k": "line", "pts": [[2, -0.2], [3, -1.2]]},
-    {"k": "line", "pts": [[3, -0.2], [4, -1.2]]},
-    {"k": "text", "at": [2.2, 3.1], "text": "{ref}", "size": 0.9, "anchor": "middle"}
-  ]
+  "schematic": {
+    "size": [4, 2],
+    "pins": {
+      "anode": {"at": [0, 1], "dir": "left"},
+      "cathode": {"at": [4, 1], "dir": "right"}
+    },
+    "shapes": [
+      {"k": "line", "pts": [[0, 1], [1.5, 1]]},
+      {"k": "poly", "pts": [[1.5, 0], [1.5, 2], [2.8, 1]]},
+      {"k": "line", "pts": [[2.8, 0], [2.8, 2]]},
+      {"k": "line", "pts": [[2.8, 1], [4, 1]]},
+      {"k": "line", "pts": [[2, -0.2], [3, -1.2]]},
+      {"k": "line", "pts": [[3, -0.2], [4, -1.2]]},
+      {"k": "text", "at": [2.2, 3.1], "text": "{ref}", "size": 0.9, "anchor": "middle"}
+    ]
+  },
+  "breadboard": {
+    "size": [3, 4],
+    "pins": {
+      "anode": {"at": [1, 4]},
+      "cathode": {"at": [2, 4]}
+    },
+    "svg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 40'><line x1='10' y1='26' x2='10' y2='40' stroke='#b0b0b0' stroke-width='1.6'/><line x1='20' y1='26' x2='20' y2='40' stroke='#b0b0b0' stroke-width='1.6'/><path d='M3 25 V14 A12 12 0 0 1 27 14 V25 Z' fill='#e53935' fill-opacity='0.88' stroke='#b71c1c' stroke-width='1'/><rect x='1' y='24' width='26' height='3' fill='#c62828' rx='1'/><path d='M8 13 A8 8 0 0 1 14 7' fill='none' stroke='#ffcdd2' stroke-width='1.6' stroke-linecap='round'/><rect x='24.6' y='9' width='2.4' height='15' fill='#7f0000' fill-opacity='0.55'/></svg>"
+  },
+  "meta": {
+    "note": "flat side and shorter leg are the cathode (right)"
+  }
 }
