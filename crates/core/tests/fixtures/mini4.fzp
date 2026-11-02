@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written test fixture in the Fritzing .fzp layout (no third-party content):
+     four connectors, both views, buses (one real, one single-member, one with an unknown member). -->
+<module fritzingVersion="0.9.3" moduleId="MiniFourModuleID">
+ <version>1</version>
+ <author>short-circ tests</author>
+ <title>Mini Four</title>
+ <label>M</label>
+ <properties>
+  <property name="family">Test</property>
+  <property name="pins">4</property>
+ </properties>
+ <description>Two-sided part used by the two-view importer tests</description>
+ <views>
+  <breadboardView>
+   <layers image="breadboard/mini4_breadboard.svg"><layer layerId="breadboard"/></layers>
+  </breadboardView>
+  <schematicView>
+   <layers image="schematic/mini4_schematic.svg"><layer layerId="schematic"/></layers>
+  </schematicView>
+ </views>
+ <connectors>
+  <connector id="connector0" name="A" type="male">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="a_pin" terminalId="a_term"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="a_pin"/></schematicView>
+   </views>
+  </connector>
+  <connector id="connector1" name="B" type="male">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="b_pin"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="b_pin"/></schematicView>
+   </views>
+  </connector>
+  <connector id="connector2" name="C" type="male">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="c_pin" terminalId="c_term"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="c_pin"/></schematicView>
+   </views>
+  </connector>
+  <connector id="connector3" name="D" type="male">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="d_pin" terminalId="d_term"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="d_pin"/></schematicView>
+   </views>
+  </connector>
+ </connectors>
+ <buses>
+  <bus id="bus0">
+   <nodeMember connectorId="connector0"/>
+   <nodeMember connectorId="connector1"/>
+  </bus>
+  <bus id="bus1">
+   <nodeMember connectorId="connector3"/>
+  </bus>
+  <bus id="bus2">
+   <nodeMember connectorId="connector2"/>
+   <nodeMember connectorId="connector9"/>
+  </bus>
+ </buses>
+</module>

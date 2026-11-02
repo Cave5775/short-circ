@@ -62,10 +62,9 @@ impl Library {
             let ext = p.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
             let def = match ext.as_str() {
                 "part" => std::fs::read_to_string(&p).ok().and_then(|src| crate::parse_part(&src).ok()),
-                // TODO(fzp stream): re-enable the on-the-fly import of Fritzing `.fzpz` / `.fzp`
-                // files found in `parts/` once `fzp` speaks format v2 (docs/FORMAT.md "Importing
-                // Fritzing parts": default `--views` both; a `.part` or an earlier source with the
-                // same type wins; files that fail to import are ignored).
+                // Fritzing bundles and loose parts import on the fly with the default options
+                // (both views); files that fail to import are ignored.
+                "fzpz" | "fzp" => crate::fzp::import_path(&p, &crate::fzp::ImportOptions::default()).ok().map(|(d, _)| d),
                 _ => None,
             };
             if let Some(d) = def {

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Hand-written test fixture: a breadboard-family part (a carrier), three holes, h1 and h2 in one strip. -->
+<module fritzingVersion="0.9.3" moduleId="TinyBoardModuleID">
+ <version>1</version>
+ <title>Tiny Board</title>
+ <properties>
+  <property name="family">Breadboard</property>
+ </properties>
+ <views>
+  <breadboardView>
+   <layers image="breadboard/tinyboard_breadboard.svg"><layer layerId="breadboard"/></layers>
+  </breadboardView>
+  <schematicView>
+   <layers image="schematic/tinyboard_schematic.svg"><layer layerId="schematic"/></layers>
+  </schematicView>
+ </views>
+ <connectors>
+  <connector id="pin1" name="h1">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="h1" terminalId="h1t"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="h1"/></schematicView>
+   </views>
+  </connector>
+  <connector id="pin2" name="h2">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="h2" terminalId="h2t"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="h2"/></schematicView>
+   </views>
+  </connector>
+  <connector id="pin3" name="h3">
+   <views>
+    <breadboardView><p layer="breadboard" svgId="h3" terminalId="h3t"/></breadboardView>
+    <schematicView><p layer="schematic" svgId="h3"/></schematicView>
+   </views>
+  </connector>
+ </connectors>
+ <buses>
+  <bus id="strip">
+   <nodeMember connectorId="pin1"/>
+   <nodeMember connectorId="pin2"/>
+  </bus>
+ </buses>
+</module>

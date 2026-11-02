@@ -1,4 +1,4 @@
-//! SVG subset reader (on `roxmltree`) that turns artwork into a [`PartDef`].
+//! SVG subset reader (on `roxmltree`) that turns artwork into a [`PartDef`] (schematic view).
 //!
 //! Supported elements: `line`, `rect` (with `rx`/`ry`), `circle`, `ellipse` (a circle when
 //! `rx == ry` and the transform is a uniform scale, otherwise a 32-gon), `polyline`,
@@ -24,7 +24,7 @@
 //! the *resulting* part-local grid coordinates; `size` grows to include them if necessary and
 //! `dir` is inferred from the nearest bbox edge.
 
-use crate::model::{Anchor, Dir, PartDef, PinDef, Shape, Style, FORMAT};
+use crate::model::{Anchor, Dir, PartDef, PinDef, PinPos, Shape, Style, ViewDef, FORMAT};
 use std::collections::BTreeMap;
 
 pub const DEFAULT_PX_PER_UNIT: f64 = 10.0;
@@ -69,29 +69,30 @@ pub fn import_svg_scaled(
 
     let mut w = r3((bb.max[0] - minx) * k).ceil().max(1.0);
     let mut h = r3((bb.max[1] - miny) * k).ceil().max(1.0);
-    let mut out_pins: Vec<PinDef> = Vec::new();
+    let mut logical: Vec<PinDef> = Vec::new();
+    let mut at: Vec<(String, [i32; 2])> = Vec::new();
     for (id, x, y) in pins {
-        if out_pins.iter().any(|p| &p.id == id) {
+        if logical.iter().any(|p| &p.id == id) {
             return Err(format!("duplicate pin id {id}"));
         }
         w = w.max(*x as f64);
         h = h.max(*y as f64);
-        out_pins.push(PinDef { id: id.clone(), at: [*x, *y], dir: Dir::Left, name: None });
+        logical.push(PinDef { id: id.clone(), name: None });
+        at.push((id.clone(), [*x, *y]));
     }
-    for p in &mut out_pins {
-        p.dir = infer_dir(p.at, w, h);
-    }
+    let positions: BTreeMap<String, PinPos> =
+        at.into_iter().map(|(id, p)| (id, PinPos { at: p, dir: infer_dir(p, w, h) })).collect();
 
     Ok(PartDef {
         format: FORMAT.to_string(),
         ty: ty.to_string(),
         name: ty.to_string(),
         category: Some("imported".to_string()),
-        size: [w, h],
-        pins: out_pins,
-        shapes,
+        pins: logical,
+        buses: Vec::new(),
+        schematic: Some(ViewDef { size: [w, h], pins: positions, shapes, svg: None }),
+        breadboard: None,
         params: None,
-        svg: None,
         meta: None,
     })
 }
@@ -723,6 +724,13 @@ pub struct Scene {
     pub declared_in: Option<[f64; 2]>,
     /// Dots per inch assumed for unit-less lengths (physical mode).
     pub dpi: f64,
+    /// Physical mode: grid units per root user unit (0 in raw mode).
+    pub scale: f64,
+    /// The root `viewBox` (`min-x min-y width height`, user units) when present and valid.
+    pub view_box: Option<[f64; 4]>,
+    /// Physical mode: size of the root viewport in grid units (declared `width`/`height`, else
+    /// the `viewBox` times `scale`).
+    pub size: Option<[f64; 2]>,
     pub warnings: Vec<String>,
 }
 
@@ -752,6 +760,14 @@ pub fn read_scene(svg: &str, physical: bool) -> Result<Scene, String> {
     }
     let dpi = detect_dpi(svg);
     let (ctm, declared_in) = if physical { root_matrix(root, dpi) } else { (IDENT, None) };
+    let view_box = root_view_box(root);
+    let size = if !physical {
+        None
+    } else if let Some(d) = declared_in {
+        Some([d[0] * 10.0, d[1] * 10.0])
+    } else {
+        view_box.map(|v| [v[2] * ctm[0], v[3] * ctm[3]])
+    };
     let inh = if physical {
         Inh {
             stroke: Some("none".into()),
@@ -788,7 +804,172 @@ pub fn read_scene(svg: &str, physical: bool) -> Result<Scene, String> {
             }
         }
     }
-    Ok(Scene { shapes, ids: w.bbs, declared_in, dpi, warnings: w.warnings })
+    let scale = if physical { ctm[0] } else { 0.0 };
+    Ok(Scene { shapes, ids: w.bbs, declared_in, dpi, scale, view_box, size, warnings: w.warnings })
+}
+
+fn root_view_box(root: roxmltree::Node) -> Option<[f64; 4]> {
+    root.attribute("viewBox").map(numbers).filter(|v| v.len() == 4 && v[2] > 0.0 && v[3] > 0.0).map(|v| [v[0], v[1], v[2], v[3]])
+}
+
+// ---------------------------------------------------------------------------------------
+// Sanitising and viewBox editing (breadboard artwork is kept as authored)
+
+fn is_href(name: &str) -> bool {
+    name.eq_ignore_ascii_case("href")
+}
+
+/// True when every `url(...)` in `v` points at a fragment (`#id`) or an embedded image.
+fn urls_are_local(v: &str) -> bool {
+    let l = v.to_ascii_lowercase();
+    let mut rest = l.as_str();
+    while let Some(i) = rest.find("url(") {
+        let arg = rest[i + 4..].trim_start().trim_start_matches(['\'', '"']).trim_start();
+        if !(arg.starts_with('#') || arg.starts_with("data:image/")) {
+            return false;
+        }
+        rest = &rest[i + 4..];
+    }
+    true
+}
+
+/// Lowercase with whitespace and control characters dropped (browsers ignore them inside a
+/// URL scheme, `java\tscript:`).
+fn squeeze(v: &str) -> String {
+    v.chars().filter(|c| !c.is_whitespace() && !c.is_control()).collect::<String>().to_ascii_lowercase()
+}
+
+fn css_is_unsafe(css: &str) -> bool {
+    let l = css.to_ascii_lowercase();
+    l.contains("@import") || squeeze(&l).contains("javascript:") || !urls_are_local(&l)
+}
+
+#[derive(Default)]
+struct Cuts {
+    ranges: Vec<(usize, usize)>,
+    scripts: usize,
+    handlers: usize,
+    external: usize,
+}
+
+fn sanitize_node(node: roxmltree::Node, src: &str, cuts: &mut Cuts) {
+    for child in node.children() {
+        if !child.is_element() {
+            continue;
+        }
+        let name = child.tag_name().name();
+        let css = name.eq_ignore_ascii_case("style")
+            && css_is_unsafe(&child.descendants().filter(|d| d.is_text()).filter_map(|d| d.text()).collect::<String>());
+        if name.eq_ignore_ascii_case("script") || name.eq_ignore_ascii_case("foreignObject") || css {
+            cuts.ranges.push((child.range().start, child.range().end));
+            if css {
+                cuts.external += 1;
+            } else {
+                cuts.scripts += 1;
+            }
+            continue;
+        }
+        for a in child.attributes() {
+            let n = a.name();
+            let v = a.value();
+            // Some(true): event handler, Some(false): script or external reference.
+            let kind = if n.len() > 2 && n[..2].eq_ignore_ascii_case("on") {
+                Some(true)
+            } else if is_href(n) {
+                let t = v.trim().to_ascii_lowercase();
+                (!(t.starts_with('#') || t.starts_with("data:image/"))).then_some(false)
+            } else if squeeze(v).contains("javascript:") || !urls_are_local(v) {
+                Some(false)
+            } else {
+                None
+            };
+            let Some(is_handler) = kind else { continue };
+            if is_handler {
+                cuts.handlers += 1;
+            } else {
+                cuts.external += 1;
+            }
+            let r = a.range();
+            let mut start = r.start;
+            while start > 0 && src.as_bytes()[start - 1].is_ascii_whitespace() {
+                start -= 1;
+            }
+            cuts.ranges.push((start, r.end));
+        }
+        sanitize_node(child, src, cuts);
+    }
+}
+
+/// Make untrusted SVG artwork safe to embed, changing nothing else: `<script>` and
+/// `<foreignObject>` elements, `on*` attributes, `javascript:` URLs, `<style>` blocks that
+/// import or reference external files, and external references (`href`/`xlink:href` not
+/// starting with `#` or `data:image/`, `url()` to anything but a fragment or an embedded image)
+/// are removed. Gradients, filters and paths are kept. An undeclared XML namespace prefix is
+/// declared (so the result is well-formed). Returns the SVG and one note per kind of removal.
+pub fn sanitize_svg(svg: &str) -> Result<(String, Vec<String>), String> {
+    let src = fix_namespaces(svg);
+    let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    let doc = roxmltree::Document::parse_with_options(&src, opts).map_err(|e| format!("invalid SVG: {e}"))?;
+    if doc.root_element().tag_name().name() != "svg" {
+        return Err("not an SVG document (no <svg> element)".into());
+    }
+    let mut cuts = Cuts::default();
+    for pi in doc.root().children().filter(|n| n.is_pi()) {
+        if pi.pi().is_some_and(|p| p.target.eq_ignore_ascii_case("xml-stylesheet")) {
+            cuts.ranges.push((pi.range().start, pi.range().end));
+            cuts.external += 1;
+        }
+    }
+    // The document node's children include the root element, so it is checked like any other.
+    sanitize_node(doc.root(), &src, &mut cuts);
+    let mut out = src.clone();
+    cuts.ranges.sort_unstable();
+    cuts.ranges.dedup();
+    for (a, b) in cuts.ranges.iter().rev() {
+        out.replace_range(*a..*b, "");
+    }
+    let mut notes = Vec::new();
+    if cuts.scripts > 0 {
+        notes.push(format!("removed {} script/foreignObject element(s) from the SVG", cuts.scripts));
+    }
+    if cuts.handlers > 0 {
+        notes.push(format!("removed {} event handler attribute(s) from the SVG", cuts.handlers));
+    }
+    if cuts.external > 0 {
+        notes.push(format!("removed {} external or script reference(s) from the SVG", cuts.external));
+    }
+    Ok((out, notes))
+}
+
+fn fmt_num(v: f64) -> String {
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" || s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Set the root `viewBox` (`min-x min-y width height`), adding the attribute when missing.
+/// Nothing else in the document changes.
+pub fn set_viewbox(svg: &str, vb: [f64; 4]) -> Result<String, String> {
+    let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    let doc = roxmltree::Document::parse_with_options(svg, opts).map_err(|e| format!("invalid SVG: {e}"))?;
+    let root = doc.root_element();
+    let text = format!("{} {} {} {}", fmt_num(vb[0]), fmt_num(vb[1]), fmt_num(vb[2]), fmt_num(vb[3]));
+    let mut out = svg.to_string();
+    if let Some(a) = root.attributes().find(|a| a.name() == "viewBox" && a.namespace().is_none()) {
+        out.replace_range(a.range_value(), &text);
+    } else {
+        let start = root.range().start;
+        let tag_end = svg[start + 1..]
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .map(|i| start + 1 + i)
+            .ok_or("malformed <svg> tag")?;
+        out.insert_str(tag_end, &format!(" viewBox=\"{text}\""));
+    }
+    Ok(out)
 }
 
 /// Douglas-Peucker simplification keeping both end points; consecutive duplicates are dropped.
@@ -1283,37 +1464,40 @@ mod tests {
     fn imports_basic_shapes_and_normalises_bbox() {
         let d = import_svg(RES, "myres", &pins()).unwrap();
         assert_eq!(d.ty, "myres");
-        assert_eq!(d.size, [8.0, 2.0]);
+        assert!(d.breadboard.is_none(), "SVG import makes a schematic-only part");
+        let v = d.schematic.as_ref().unwrap();
+        assert_eq!(v.size, [8.0, 2.0]);
         assert_eq!(d.pins.len(), 2);
-        assert_eq!(d.pins[0].dir, Dir::Left);
-        assert_eq!(d.pins[1].dir, Dir::Right);
-        assert_eq!(d.shapes.len(), 5, "defs content must be skipped");
-        match &d.shapes[0] {
+        assert_eq!(v.pins["a"].at, [0, 1]);
+        assert_eq!(v.pins["a"].dir, Dir::Left);
+        assert_eq!(v.pins["b"].dir, Dir::Right);
+        assert_eq!(v.shapes.len(), 5, "defs content must be skipped");
+        match &v.shapes[0] {
             Shape::Line { pts, style } => {
                 assert_eq!(pts, &vec![[0.0, 1.0], [2.0, 1.0]]);
                 assert_eq!(style.stroke.as_deref(), Some("#336699"));
             }
             s => panic!("{s:?}"),
         }
-        match &d.shapes[1] {
+        match &v.shapes[1] {
             Shape::Rect { at, size, style, .. } => {
                 assert_eq!((*at, *size), ([2.0, 0.0], [4.0, 2.0]));
                 assert_eq!(style.width, Some(0.2));
             }
             s => panic!("{s:?}"),
         }
-        match &d.shapes[2] {
+        match &v.shapes[2] {
             Shape::Line { pts, style } => {
                 assert_eq!(pts[1], [8.0, 1.0]);
                 assert_eq!(style.stroke, None, "black stroke maps to theme foreground");
             }
             s => panic!("{s:?}"),
         }
-        match &d.shapes[3] {
+        match &v.shapes[3] {
             Shape::Circle { at, r, .. } => assert_eq!((*at, *r), ([4.0, 1.0], 0.5)),
             s => panic!("{s:?}"),
         }
-        match &d.shapes[4] {
+        match &v.shapes[4] {
             Shape::Text { at, text, size, anchor, .. } => {
                 assert_eq!(text, "R & X");
                 assert_eq!(*anchor, Anchor::Middle);
@@ -1323,22 +1507,23 @@ mod tests {
             s => panic!("{s:?}"),
         }
         // The result must serialise to a valid .part.
-        let json = serde_json::to_string(&d).unwrap();
-        assert_eq!(crate::parse_part(&json).unwrap().shapes.len(), 5);
+        let json = crate::write::part_to_string(&d);
+        assert_eq!(crate::parse_part(&json).unwrap().schematic.unwrap().shapes.len(), 5);
     }
 
     #[test]
     fn no_pins_yields_no_pins() {
         let d = import_svg(RES, "x", &[]).unwrap();
         assert!(d.pins.is_empty());
-        assert_eq!(d.size, [8.0, 2.0]);
+        assert_eq!(d.schematic.as_ref().unwrap().size, [8.0, 2.0]);
     }
 
     #[test]
     fn custom_scale_and_pin_growth() {
         let d = import_svg_scaled(RES, "x", &[("p".into(), 0, 3)], 20.0).unwrap();
-        assert_eq!(d.size, [4.0, 3.0], "bbox 80x20 px at 20 px/unit, grown to include the pin");
-        assert_eq!(d.pins[0].dir, Dir::Left);
+        let v = d.schematic.as_ref().unwrap();
+        assert_eq!(v.size, [4.0, 3.0], "bbox 80x20 px at 20 px/unit, grown to include the pin");
+        assert_eq!(v.pins["p"].dir, Dir::Left);
         assert!(import_svg_scaled(RES, "x", &[], 0.0).is_err());
     }
 
@@ -1355,17 +1540,18 @@ mod tests {
         let svg = r#"<svg><polygon points="0,0 20,0 10,20" fill="red"/><polyline points="0 30 20 30"/>
             <ellipse cx="10" cy="10" rx="10" ry="5" fill="none"/><ellipse cx="50" cy="10" rx="4" ry="4"/></svg>"#;
         let d = import_svg(svg, "x", &[]).unwrap();
-        assert!(matches!(&d.shapes[0], Shape::Poly { pts, style } if pts.len() == 3 && style.fill.as_deref() == Some("#ff0000")));
-        assert!(matches!(&d.shapes[1], Shape::Line { pts, .. } if pts.len() == 2));
-        assert!(matches!(&d.shapes[2], Shape::Poly { pts, .. } if pts.len() == 32));
-        assert!(matches!(&d.shapes[3], Shape::Circle { r, .. } if *r == 0.4));
+        let shapes = &d.schematic.as_ref().unwrap().shapes;
+        assert!(matches!(&shapes[0], Shape::Poly { pts, style } if pts.len() == 3 && style.fill.as_deref() == Some("#ff0000")));
+        assert!(matches!(&shapes[1], Shape::Line { pts, .. } if pts.len() == 2));
+        assert!(matches!(&shapes[2], Shape::Poly { pts, .. } if pts.len() == 32));
+        assert!(matches!(&shapes[3], Shape::Circle { r, .. } if *r == 0.4));
     }
 
     #[test]
     fn nested_transforms_compose() {
         let svg = r#"<svg><g transform="translate(10 0)"><g transform="scale(2)"><line x1="0" y1="0" x2="10" y2="5"/></g></g></svg>"#;
         let d = import_svg(svg, "x", &[]).unwrap();
-        match &d.shapes[0] {
+        match &d.schematic.as_ref().unwrap().shapes[0] {
             Shape::Line { pts, .. } => assert_eq!(pts, &vec![[0.0, 0.0], [2.0, 1.0]]),
             s => panic!("{s:?}"),
         }
@@ -1420,8 +1606,9 @@ mod tests {
         let svg = r#"<svg><line x1="0" y1="0" x2="10" y2="0" style="stroke:#ff0000;stroke-width:3"/>
             <line x1="0" y1="5" x2="10" y2="5" display="none"/><rect x="0" y="0" width="1" height="1" stroke="none"/></svg>"#;
         let d = import_svg(svg, "x", &[]).unwrap();
-        assert_eq!(d.shapes.len(), 1);
-        let Shape::Line { style, .. } = &d.shapes[0] else { panic!() };
+        let shapes = &d.schematic.as_ref().unwrap().shapes;
+        assert_eq!(shapes.len(), 1);
+        let Shape::Line { style, .. } = &shapes[0] else { panic!() };
         assert_eq!(style.stroke.as_deref(), Some("#ff0000"));
         assert_eq!(style.width, Some(0.3));
     }
@@ -1549,6 +1736,51 @@ mod tests {
         assert_eq!(sc.ids["t"], [1.0, 2.0, 1.5, 2.5]);
         assert_eq!(sc.ids["z"], [4.0, 4.0, 4.0, 4.0]);
         assert_eq!(sc.ids["h"], [0.0, 0.0, 3.0, 0.0]);
+    }
+
+    #[test]
+    fn sanitize_removes_active_content_and_external_references_only() {
+        let svg = r##"<?xml version="1.0"?>
+<?xml-stylesheet href="http://x/y.css"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" onload="boom()" viewBox="0 0 10 10">
+  <script>alert(1)</script>
+  <style>.a{fill:red}</style>
+  <style>@import url(http://x/y.css); .b{fill:blue}</style>
+  <linearGradient id="g"><stop offset="0" stop-color="#fff"/></linearGradient>
+  <rect class="a" width="1" height="1" fill="url(#g)" onclick="x()" ONMOUSEOVER="y()"/>
+  <rect width="2" height="2" style="fill:url(http://x/p.png)"/>
+  <a xlink:href="javascript:alert(1)"><rect width="3" height="3"/></a>
+  <a href=" JaVa&#9;script:alert(1)"><rect width="3" height="3"/></a>
+  <use xlink:href="#g"/><use href="other.svg#a"/>
+  <image href="data:image/png;base64,AAAA"/><image xlink:href="https://e/x.png"/>
+  <foreignObject><div>hi</div></foreignObject>
+  <path d="M0 0 L1 1" fill="none" stroke="#112233"/>
+</svg>"##;
+        let (out, notes) = sanitize_svg(svg).unwrap();
+        for bad in ["script", "alert", "onclick", "ONMOUSEOVER", "onload", "x/y.css", "x/p.png", "other.svg", "e/x.png", "foreignObject", "xml-stylesheet"] {
+            assert!(!out.contains(bad), "{bad} survived: {out}");
+        }
+        for good in ["fill:red", "linearGradient", "url(#g)", "href=\"#g\"", "data:image/png;base64,AAAA", "stroke=\"#112233\"", "viewBox=\"0 0 10 10\""] {
+            assert!(out.contains(good), "{good} was lost: {out}");
+        }
+        assert!(roxmltree::Document::parse(&out).is_ok(), "{out}");
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        // Clean artwork passes through byte for byte.
+        let clean = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 4 4\">
+ <rect id=\"a\" width=\"4\" height=\"4\"/>
+</svg>";
+        assert_eq!(sanitize_svg(clean).unwrap(), (clean.to_string(), vec![]));
+        assert!(sanitize_svg("<html/>").is_err());
+    }
+
+    #[test]
+    fn set_viewbox_replaces_or_adds_only_that_attribute() {
+        let a = "<svg xmlns=\"x\" viewBox=\"0 0 10 5\" width=\"1in\"><g/></svg>";
+        assert_eq!(set_viewbox(a, [-1.5, 2.0, 10.0, 5.0]).unwrap(), "<svg xmlns=\"x\" viewBox=\"-1.5 2 10 5\" width=\"1in\"><g/></svg>");
+        let b = "<?xml version=\"1.0\"?><svg width=\"1in\"/>";
+        assert_eq!(set_viewbox(b, [0.0, 0.0, 9.0, 4.5]).unwrap(), "<?xml version=\"1.0\"?><svg viewBox=\"0 0 9 4.5\" width=\"1in\"/>");
+        assert_eq!(fmt_num(-0.0000001), "0");
+        assert_eq!(fmt_num(1.0000000000000002), "1");
     }
 
     #[test]

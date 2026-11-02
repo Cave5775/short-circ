@@ -1,8 +1,5 @@
 //! short-circ core: format model, netlist, validation, SVG export. No GUI dependencies.
 //! Format `short-circ/2`; see docs/FORMAT.md.
-//!
-//! v2 transition: `fzp` and `svgimport` still speak the v1 model and stay switched off
-//! (`cfg(any())`) until the import stream ports them; delete the attribute when a module compiles.
 
 pub mod builtin;
 pub mod color;
@@ -18,9 +15,7 @@ pub mod transform;
 pub mod validate;
 pub mod write;
 
-#[cfg(any())]
 pub mod fzp;
-#[cfg(any())]
 pub mod svgimport;
 
 pub use migrate::{parse_circuit, parse_part, ParseError};

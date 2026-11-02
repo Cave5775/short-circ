@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Hand-written test fixture: 0.6 x 0.4 in = 6 x 4 grid units (1 user unit = 0.01 in).
+     Every terminal sits 0.1 grid unit right of and below its grid point (off-grid), one is inside a
+     translated group, one inside a translated and rotated group. Contains active content on
+     purpose: the importer must strip the script, the handler and the external references. -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="0.6in" height="0.4in" viewBox="0 0 60 40">
+ <defs>
+  <linearGradient id="grad" x1="0" y1="0" x2="0" y2="1">
+   <stop offset="0" stop-color="#dddddd"/>
+   <stop offset="1" stop-color="#888888"/>
+  </linearGradient>
+  <filter id="soft"><feGaussianBlur stdDeviation="0.5"/></filter>
+  <circle id="dot" cx="30" cy="20" r="2" fill="#222222"/>
+ </defs>
+ <script type="text/javascript">alert("x");</script>
+ <rect id="body" x="0" y="0" width="60" height="40" fill="url(#grad)" filter="url(#soft)" onclick="alert(1)"/>
+ <use href="#dot"/>
+ <a xlink:href="http://example.com/page"><rect x="20" y="0" width="20" height="4" fill="#cc0000"/></a>
+ <image x="0" y="0" width="4" height="4" href="http://evil.example/x.png"/>
+ <image x="4" y="0" width="4" height="4" href="data:image/png;base64,iVBORw0KGgo="/>
+ <g id="grpA" transform="translate(5 0)">
+  <rect id="a_pin" x="4" y="9" width="4" height="4" fill="#c0c0c0"/>
+  <rect id="a_term" x="5" y="10" width="2" height="2" fill="none" stroke="none"/>
+ </g>
+ <circle id="b_pin" cx="11" cy="31" r="2" fill="url(#grad)"/>
+ <g id="grpC" transform="translate(50 20) rotate(90)">
+  <rect id="c_pin" x="-10" y="-2" width="2" height="2" fill="#c0c0c0"/>
+  <rect id="c_term" x="-10" y="-2" width="2" height="2" fill="none" stroke="none"/>
+ </g>
+ <path id="d_pin" d="M 50 30 h 2 v 2 h -2 z" fill="#c0c0c0"/>
+ <path id="d_term" d="M 50 30 h 2 v 2 h -2 z" fill="none" stroke="none"/>
+</svg>

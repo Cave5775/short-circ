@@ -1,63 +1,43 @@
 //! Import of Fritzing parts (`.fzpz` bundles and loose `.fzp` + SVG files) as [`PartDef`]s.
 //!
-//! A `.fzp` is XML: `<title>`, `<properties>`, `<views>` (each view names its SVG through
-//! `<layers image="schematic/foo.svg">`) and `<connectors>`, where every `<connector id name>`
-//! lists, per view, the SVG element (`svgId`, optionally `terminalId`) that carries the pin.
-//! The chosen view's SVG is converted by [`crate::svgimport::read_scene`] in *physical* mode
-//! (real size from `width`/`height`/`viewBox`, 1 grid unit = 0.1 in); pin positions come from the
-//! element bounding boxes.
+//! One import produces ONE v2 part holding every requested view (docs/FORMAT.md "Importing
+//! Fritzing parts"). A `.fzp` is XML: `<title>`, `<properties>`, `<views>` (each view names its SVG
+//! through `<layers image="schematic/foo.svg">`), `<connectors>`, where every `<connector id name>`
+//! lists, per view, the SVG element (`svgId`, optionally `terminalId`) that carries the pin, and
+//! `<buses>`.
 //!
-//! Pin position: centre of the `terminalId` element, else the *outer end* of the `svgId` element
-//! when that element is clearly elongated (a pin line), else its centre. Positions are shifted
-//! together so the average rounding error is zero, rounded to integers, and the whole drawing is
-//! moved by a whole number of units so everything lies at x, y >= 0.
+//! The logical `pins` come from the connector list, once for all views. Per view, a connector's
+//! position is the centre of its `terminalId` element, else the *outer end* of the `svgId`
+//! element when that element is clearly elongated (a pin line), else its centre. Positions are
+//! shifted together so the average rounding error is zero (when any is off-grid by 0.08 unit or
+//! more) and rounded to integers.
 //!
-//! Not handled: bus definitions, bendable legs, PCB view, multi-layer breadboard art, raster
-//! images, gradients (flat fallback), filters, clip paths, masks, fonts (text keeps size/anchor).
+//! - Schematic: the SVG is converted to native shapes by [`crate::svgimport::read_scene`]
+//!   (physical mode, 1 grid unit = 0.1 in) and the whole drawing moves so it starts at (0,0).
+//! - Breadboard: the SVG is kept verbatim (sanitised, see [`crate::svgimport::sanitize_svg`]) as
+//!   `svg`; the rounding shift is applied to its root `viewBox`, so the art is never rewritten.
+//!
+//! Not handled: PCB view, bendable legs, multi-layer art, raster images in the schematic,
+//! gradients in the schematic (flat fallback), filters, clip paths, masks, fonts.
 
-use crate::model::{Anchor, PartDef, PinDef, Shape, Style, FORMAT};
+use crate::model::{Anchor, PartDef, PinDef, PinPos, Shape, Style, View, ViewDef, FORMAT};
 use crate::svgimport::{self, Scene};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// Which Fritzing view to import.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum View {
-    #[default]
-    Schematic,
-    Breadboard,
-}
-
-impl View {
-    /// Element name of the view inside `<views>` and `<connector><views>`.
-    fn tag(self) -> &'static str {
-        match self {
-            View::Schematic => "schematicView",
-            View::Breadboard => "breadboardView",
-        }
-    }
-    /// Folder name used by the Fritzing SVG layouts.
-    pub fn folder(self) -> &'static str {
-        match self {
-            View::Schematic => "schematic",
-            View::Breadboard => "breadboard",
-        }
-    }
-    pub fn parse(s: &str) -> Option<View> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "schematic" => Some(View::Schematic),
-            "breadboard" => Some(View::Breadboard),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ImportOptions {
-    pub view: View,
+    /// Views to produce (a view the part lacks gives a warning, an error only when none works).
+    pub views: Vec<View>,
     /// Part type name; derived from the title when `None`.
     pub type_name: Option<String>,
+}
+
+impl Default for ImportOptions {
+    fn default() -> Self {
+        ImportOptions { views: vec![View::Schematic, View::Breadboard], type_name: None }
+    }
 }
 
 /// Parts beyond this size are not read (guards against zip bombs and absurd inputs).
@@ -66,12 +46,39 @@ const WARN_BIG: f64 = 60.0;
 
 type Loader<'a> = dyn FnMut(&str) -> Option<Vec<u8>> + 'a;
 
-struct Conn {
-    id: String,
-    name: String,
+/// Where one connector sits in one view of the fzp.
+struct ConnView {
     svg_id: Option<String>,
     term_id: Option<String>,
     leg_id: Option<String>,
+}
+
+struct Conn {
+    id: String,
+    name: String,
+    /// Indexed by [`vi`].
+    views: [Option<ConnView>; 2],
+}
+
+/// A logical pin: unique id and the original connector name when it differs.
+struct Pin {
+    id: String,
+    name: Option<String>,
+}
+
+fn vi(v: View) -> usize {
+    match v {
+        View::Schematic => 0,
+        View::Breadboard => 1,
+    }
+}
+
+/// Element name of the view inside `<views>` and `<connector><views>`.
+fn tag(v: View) -> &'static str {
+    match v {
+        View::Schematic => "schematicView",
+        View::Breadboard => "breadboardView",
+    }
 }
 
 fn text_of(n: roxmltree::Node) -> String {
@@ -147,85 +154,218 @@ pub fn import_fzp(
             }
         }
     }
+    let is_board = meta.get("family").is_some_and(|f| f.trim().eq_ignore_ascii_case("breadboard"));
 
-    // The chosen view and its SVG.
-    let view = opts.view;
-    let views = child(module, "views").ok_or("part has no <views>")?;
-    let view_el = child(views, view.tag()).ok_or_else(|| format!("part has no {} (try --view)", view.tag()))?;
-    let image = child(view_el, "layers")
-        .and_then(|l| l.attribute("image"))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| format!("{} names no SVG image", view.tag()))?;
-    let svg_bytes = load_asset(&image).ok_or_else(|| format!("SVG file not found: {image}"))?;
-    let svg = String::from_utf8_lossy(&svg_bytes).into_owned();
-    let scene = svgimport::read_scene(&svg, true).map_err(|e| format!("{image}: {e}"))?;
-    warnings.extend(scene.warnings.iter().cloned());
-    if scene.shapes.is_empty() {
-        return Err(format!("{image}: no drawable shapes found"));
-    }
+    let views_el = child(module, "views").ok_or("part has no <views>")?;
 
-    // Connectors present in this view.
+    // All connectors, with their per-view element references.
     let mut conns: Vec<Conn> = Vec::new();
     if let Some(cs) = child(module, "connectors") {
         for c in cs.children().filter(|c| c.is_element() && c.tag_name().name() == "connector") {
             let id = c.attribute("id").unwrap_or("").trim().to_string();
             let name = c.attribute("name").unwrap_or("").trim().to_string();
-            let p = child(c, "views")
-                .and_then(|v| child(v, view.tag()))
-                .and_then(|v| v.children().find(|x| x.is_element() && x.tag_name().name() == "p"));
-            let Some(p) = p else {
-                warnings.push(format!("connector {id} has no {}; skipped", view.tag()));
-                continue;
-            };
-            let at = |k: &str| p.attribute(k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-            conns.push(Conn { id, name, svg_id: at("svgId"), term_id: at("terminalId"), leg_id: at("legId") });
+            let mut views: [Option<ConnView>; 2] = [None, None];
+            for v in View::ALL {
+                let p = child(c, "views")
+                    .and_then(|vs| child(vs, tag(v)))
+                    .and_then(|vv| vv.children().find(|x| x.is_element() && x.tag_name().name() == "p"));
+                if let Some(p) = p {
+                    let at = |k: &str| p.attribute(k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                    views[vi(v)] = Some(ConnView { svg_id: at("svgId"), term_id: at("terminalId"), leg_id: at("legId") });
+                }
+            }
+            conns.push(Conn { id, name, views });
         }
-    }
-    if conns.is_empty() {
-        warnings.push(format!("no connectors in the {}; the part has no pins", view.tag()));
     }
 
-    // Pin positions in grid units (unshifted scene coordinates).
-    let scene_bb = svgimport::shapes_bbox(&scene.shapes).ok_or("SVG has no geometry")?;
-    let centre = [(scene_bb[0] + scene_bb[2]) / 2.0, (scene_bb[1] + scene_bb[3]) / 2.0];
-    let mut used_ids: BTreeSet<String> = BTreeSet::new();
-    let mut raw_pins: Vec<(String, Option<String>, [f64; 2])> = Vec::new();
-    for c in &conns {
+    // Logical pin ids: the trimmed name, else (empty or taken) the connector id, kept unique.
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut pins: Vec<Pin> = Vec::new();
+    for (n, c) in conns.iter().enumerate() {
         let mut id = if c.name.is_empty() { c.id.clone() } else { c.name.clone() };
-        if id.is_empty() || used_ids.contains(&id) {
-            id = if c.id.is_empty() { format!("pin{}", raw_pins.len() + 1) } else { c.id.clone() };
+        if id.is_empty() || used.contains(&id) {
+            id = if c.id.is_empty() { format!("pin{}", n + 1) } else { c.id.clone() };
         }
         let mut unique = id.clone();
-        let mut n = 2;
-        while used_ids.contains(&unique) {
-            unique = format!("{id}_{n}");
-            n += 1;
+        let mut k = 2;
+        while used.contains(&unique) {
+            unique = format!("{id}_{k}");
+            k += 1;
         }
         if unique != c.name && !c.name.is_empty() {
             warnings.push(format!("pin name {:?} is not unique or usable; using id {unique:?}", c.name));
         }
-        let Some(pos) = locate_pin(&scene, c, centre, &mut warnings) else {
-            warnings.push(format!("pin {unique}: element not found in {image}; pin skipped"));
-            continue;
-        };
-        used_ids.insert(unique.clone());
-        let display = if unique != c.name && !c.name.is_empty() { Some(c.name.clone()) } else { None };
-        raw_pins.push((unique, display, pos));
+        let name = if unique != c.name && !c.name.is_empty() { Some(c.name.clone()) } else { None };
+        used.insert(unique.clone());
+        pins.push(Pin { id: unique, name });
     }
 
-    // Snap: shift everything so pins land on integers with zero mean error, then round.
-    // Axes whose rounding errors are all tiny (< 0.08 unit = 0.008 in) are left alone.
+    // The requested views (each once, in model order).
+    let want: Vec<View> = View::ALL.into_iter().filter(|v| opts.views.contains(v)).collect();
+    if want.is_empty() {
+        return Err("no views requested".into());
+    }
+    let mut schematic: Option<ViewDef> = None;
+    let mut breadboard: Option<ViewDef> = None;
+    let mut errors: Vec<String> = Vec::new();
+    let mut view_warnings: Vec<String> = Vec::new();
+    for v in want {
+        let mut w: Vec<String> = Vec::new();
+        let built = import_view(v, views_el, &conns, &pins, load_asset, &mut w);
+        match built {
+            Ok(def) => {
+                view_warnings.extend(w);
+                match v {
+                    View::Schematic => schematic = Some(def),
+                    View::Breadboard => breadboard = Some(def),
+                }
+            }
+            Err(e) => errors.push(format!("{}: {e}", v.key())),
+        }
+    }
+    if schematic.is_none() && breadboard.is_none() {
+        return Err(errors.join("; "));
+    }
+    for e in errors {
+        warnings.push(format!("view skipped, {e}"));
+    }
+    warnings.extend(view_warnings);
+
+    // Buses over the logical pin ids.
+    let by_conn: BTreeMap<&str, &str> = conns.iter().zip(&pins).map(|(c, p)| (c.id.as_str(), p.id.as_str())).collect();
+    let mut buses: Vec<Vec<String>> = Vec::new();
+    if let Some(bs) = child(module, "buses") {
+        for b in bs.children().filter(|c| c.is_element() && c.tag_name().name() == "bus") {
+            let mut members: Vec<String> = Vec::new();
+            for m in b.children().filter(|c| c.is_element() && c.tag_name().name() == "nodeMember") {
+                let cid = m.attribute("connectorId").unwrap_or("").trim();
+                match by_conn.get(cid) {
+                    Some(p) => {
+                        if !members.iter().any(|x| x == p) {
+                            members.push((*p).to_string());
+                        }
+                    }
+                    None => warnings.push(format!(
+                        "bus {}: member {cid:?} is not a connector; dropped",
+                        b.attribute("id").unwrap_or("?")
+                    )),
+                }
+            }
+            if members.len() >= 2 {
+                buses.push(members);
+            }
+        }
+    }
+
+    let ty = match opts.type_name.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => t.to_string(),
+        None => {
+            let s = slug(&title);
+            let s = if s.is_empty() { slug(&module_id) } else { s };
+            if s.is_empty() {
+                "fritzing_part".to_string()
+            } else {
+                s
+            }
+        }
+    };
+    let name = if title.is_empty() { ty.clone() } else { title.clone() };
+    let part = PartDef {
+        format: FORMAT.to_string(),
+        ty,
+        name,
+        category: Some(if is_board { "board" } else { "imported" }.to_string()),
+        pins: pins.into_iter().map(|p| PinDef { id: p.id, name: p.name }).collect(),
+        buses,
+        schematic,
+        breadboard,
+        params: None,
+        meta: Some(meta),
+    };
+    Ok((part, warnings))
+}
+
+/// Build one view: read its SVG, place the connectors, snap, and make the [`ViewDef`].
+fn import_view(
+    view: View,
+    views_el: roxmltree::Node,
+    conns: &[Conn],
+    pins: &[Pin],
+    load_asset: &mut Loader<'_>,
+    warnings: &mut Vec<String>,
+) -> Result<ViewDef, String> {
+    let t = tag(view);
+    let view_el = child(views_el, t).ok_or_else(|| format!("part has no {t}"))?;
+    let image = child(view_el, "layers")
+        .and_then(|l| l.attribute("image"))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("{t} names no SVG image"))?;
+    let svg_bytes = load_asset(&image).ok_or_else(|| format!("SVG file not found: {image}"))?;
+    let svg = String::from_utf8_lossy(&svg_bytes).into_owned();
+    let scene = svgimport::read_scene(&svg, true).map_err(|e| format!("{image}: {e}"))?;
+    match view {
+        View::Schematic => {
+            warnings.extend(scene.warnings.iter().cloned());
+            if scene.shapes.is_empty() {
+                return Err(format!("{image}: no drawable shapes found"));
+            }
+        }
+        View::Breadboard => {
+            if scene.size.is_none() && scene.shapes.is_empty() {
+                return Err(format!("{image}: SVG declares no size and has no geometry"));
+            }
+        }
+    }
+    if !conns.iter().any(|c| c.views[vi(view)].is_some()) {
+        warnings.push(format!("no connectors in the {t}; the view has no pins"));
+    }
+
+    // Drawing centre, used to tell the outer end of a pin line.
+    let shapes_bb = svgimport::shapes_bbox(&scene.shapes);
+    let centre = match (shapes_bb, scene.size) {
+        (Some(b), _) => [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0],
+        (None, Some(s)) => [s[0] / 2.0, s[1] / 2.0],
+        (None, None) => [0.0, 0.0],
+    };
+    // Raw pin positions in grid units (unshifted scene coordinates).
+    let mut raw: Vec<(usize, [f64; 2])> = Vec::new();
+    for (i, c) in conns.iter().enumerate() {
+        let label = &pins[i].id;
+        let Some(cv) = &c.views[vi(view)] else {
+            warnings.push(format!("connector {} (pin {label}) has no {t}; omitted from the {} view", c.id, view.key()));
+            continue;
+        };
+        match locate_pin(&scene, cv, centre, warnings) {
+            Some(pos) => raw.push((i, pos)),
+            None => warnings.push(format!("pin {label}: element not found in {image}; omitted from the {} view", view.key())),
+        }
+    }
+    let (pts, sx, sy) = snap_points(&raw, pins, warnings);
+
+    match view {
+        View::Schematic => {
+            let scene_bb = shapes_bb.ok_or("SVG has no geometry")?;
+            schematic_view(scene, scene_bb, &raw, pts, (sx, sy), pins, warnings)
+        }
+        View::Breadboard => breadboard_view(&svg, &scene, &raw, pts, (sx, sy), pins, &image, warnings),
+    }
+}
+
+/// Shift all points so they land on integers with zero mean error, then round; nudge pins that
+/// land on the same point. Axes whose rounding errors are all tiny (< 0.08 unit = 0.008 in) are
+/// left alone. Returns the integer points and the applied shift.
+fn snap_points(raw: &[(usize, [f64; 2])], pins: &[Pin], warnings: &mut Vec<String>) -> (Vec<[i32; 2]>, f64, f64) {
     let snap = |axis: usize| -> f64 {
-        let errs: Vec<f64> = raw_pins.iter().map(|p| p.2[axis].round() - p.2[axis]).collect();
+        let errs: Vec<f64> = raw.iter().map(|p| p.1[axis].round() - p.1[axis]).collect();
         if errs.iter().all(|e| e.abs() < 0.08) {
             0.0
         } else {
             errs.iter().sum::<f64>() / errs.len() as f64
         }
     };
-    let (sx, sy) = if raw_pins.is_empty() { (0.0, 0.0) } else { (snap(0), snap(1)) };
-    let mut pts: Vec<[i32; 2]> = raw_pins.iter().map(|p| [(p.2[0] + sx).round() as i32, (p.2[1] + sy).round() as i32]).collect();
+    let (sx, sy) = if raw.is_empty() { (0.0, 0.0) } else { (snap(0), snap(1)) };
+    let mut pts: Vec<[i32; 2]> = raw.iter().map(|p| [(p.1[0] + sx).round() as i32, (p.1[1] + sy).round() as i32]).collect();
     let mut taken: BTreeSet<[i32; 2]> = BTreeSet::new();
     for (i, p) in pts.iter_mut().enumerate() {
         if taken.contains(p) {
@@ -241,11 +381,24 @@ pub fn import_fzp(
             }
             warnings.push(format!(
                 "pins landed on the same point ({},{}); pin {} moved to ({},{})",
-                orig[0], orig[1], raw_pins[i].0, p[0], p[1]
+                orig[0], orig[1], pins[raw[i].0].id, p[0], p[1]
             ));
         }
         taken.insert(*p);
     }
+    (pts, sx, sy)
+}
+
+/// Schematic: native shapes, drawing moved to start at (0,0), `{ref}` text, `dir` from the box.
+fn schematic_view(
+    scene: Scene,
+    scene_bb: svgimport::Bb,
+    raw: &[(usize, [f64; 2])],
+    mut pts: Vec<[i32; 2]>,
+    (sx, sy): (f64, f64),
+    pins: &[Pin],
+    warnings: &mut Vec<String>,
+) -> Result<ViewDef, String> {
     // Whole-unit translation so all geometry is at x, y >= 0.
     let mut min = [scene_bb[0] + sx, scene_bb[1] + sy];
     for p in &pts {
@@ -255,6 +408,7 @@ pub fn import_fzp(
     // Geometry up to 0.4 unit left of / above the origin (round caps, pin stubs) stays put.
     let (tx, ty) = ((-(min[0] + 0.4).floor()) as i32, (-(min[1] + 0.4).floor()) as i32);
     let (dx, dy) = (sx + tx as f64, sy + ty as f64);
+    let (declared, dpi) = (scene.declared_in, scene.dpi);
     let mut shapes: Vec<Shape> = scene.shapes.into_iter().map(|s| svgimport::translate_shape(s, dx, dy)).collect();
     for p in &mut pts {
         p[0] += tx;
@@ -274,21 +428,19 @@ pub fn import_fzp(
     if w < 1.5 && h < 1.5 {
         warnings.push(format!("size {w}x{h} grid units is unusually small; check the SVG units"));
     }
-    if let Some(d) = scene.declared_in {
+    if let Some(d) = declared {
         let (dw, dh) = (d[0] * 10.0, d[1] * 10.0);
         if (dw - w).abs() > 4.0 || (dh - h).abs() > 4.0 {
             warnings.push(format!("drawing extends well beyond the declared SVG size ({dw:.1}x{dh:.1} units)"));
         }
     } else {
-        warnings.push(format!("SVG declares no physical size; assumed {} dpi", scene.dpi));
+        warnings.push(format!("SVG declares no physical size; assumed {dpi} dpi"));
     }
 
-    let pins: Vec<PinDef> = raw_pins
-        .iter()
-        .zip(&pts)
-        .map(|(rp, at)| PinDef { id: rp.0.clone(), at: *at, dir: svgimport::infer_dir(*at, w, h), name: rp.1.clone() })
-        .collect();
-
+    let mut positions: BTreeMap<String, PinPos> = BTreeMap::new();
+    for ((i, _), at) in raw.iter().zip(&pts) {
+        positions.insert(pins[*i].id.clone(), PinPos { at: *at, dir: svgimport::infer_dir(*at, w, h) });
+    }
     shapes.push(Shape::Text {
         at: [w / 2.0, -0.8],
         text: "{ref}".into(),
@@ -296,37 +448,68 @@ pub fn import_fzp(
         anchor: Anchor::Middle,
         style: Style::default(),
     });
+    Ok(ViewDef { size: [w, h], pins: positions, shapes, svg: None })
+}
 
-    let ty = match opts.type_name.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        Some(t) => t.to_string(),
-        None => {
-            let s = slug(&title);
-            let s = if s.is_empty() { slug(&module_id) } else { s };
-            if s.is_empty() {
-                "fritzing_part".to_string()
-            } else {
-                s
-            }
+/// Breadboard: the sanitised SVG as authored; the snapping shift goes into the root `viewBox`.
+#[allow(clippy::too_many_arguments)]
+fn breadboard_view(
+    svg: &str,
+    scene: &Scene,
+    raw: &[(usize, [f64; 2])],
+    pts: Vec<[i32; 2]>,
+    (sx, sy): (f64, f64),
+    pins: &[Pin],
+    image: &str,
+    warnings: &mut Vec<String>,
+) -> Result<ViewDef, String> {
+    let (clean, notes) = svgimport::sanitize_svg(svg).map_err(|e| format!("{image}: {e}"))?;
+    warnings.extend(notes.into_iter().map(|n| format!("{image}: {n}")));
+    let size = match (scene.size, svgimport::shapes_bbox(&scene.shapes)) {
+        (Some(s), _) => s,
+        (None, Some(b)) => [b[2].ceil(), b[3].ceil()],
+        (None, None) => return Err(format!("{image}: SVG declares no size and has no geometry")),
+    };
+    let (w, h) = (r3(size[0]).max(1.0), r3(size[1]).max(1.0));
+    let s = scene.scale;
+    if !(s.is_finite() && s > 0.0) {
+        return Err(format!("{image}: SVG has a zero size"));
+    }
+    if w > WARN_BIG || h > WARN_BIG {
+        warnings.push(format!("size {w}x{h} grid units is unusually large (0.1 in each); check the SVG units"));
+    }
+    if scene.declared_in.is_none() {
+        warnings.push(format!("SVG declares no physical size; assumed {} dpi", scene.dpi));
+    }
+    // Pins land on integers by moving the viewBox origin (the art stays as it is). A missing
+    // viewBox is added so the art stretches over `size`.
+    let vb = scene.view_box.unwrap_or([0.0, 0.0, w / s, h / s]);
+    let svg_out = if scene.view_box.is_none() || sx != 0.0 || sy != 0.0 {
+        svgimport::set_viewbox(&clean, [vb[0] - sx / s, vb[1] - sy / s, vb[2], vb[3]])?
+    } else {
+        clean
+    };
+    let mut positions: BTreeMap<String, PinPos> = BTreeMap::new();
+    for ((i, _), at) in raw.iter().zip(&pts) {
+        if (at[0] as f64) < -0.5 || (at[1] as f64) < -0.5 || at[0] as f64 > w + 0.5 || at[1] as f64 > h + 0.5 {
+            warnings.push(format!("pin {} at ({},{}) lies outside the {w}x{h} breadboard view", pins[*i].id, at[0], at[1]));
         }
-    };
-    let name = if title.is_empty() { ty.clone() } else { title.clone() };
-    let part = PartDef {
-        format: FORMAT.to_string(),
-        ty,
-        name,
-        category: Some("imported".to_string()),
-        size: [w, h],
-        pins,
-        shapes,
-        params: None,
-        svg: None,
-        meta: Some(meta),
-    };
-    Ok((part, warnings))
+        positions.insert(pins[*i].id.clone(), PinPos { at: *at, ..PinPos::default() });
+    }
+    Ok(ViewDef { size: [w, h], pins: positions, shapes: Vec::new(), svg: Some(svg_out) })
+}
+
+fn r3(v: f64) -> f64 {
+    let r = (v * 1000.0).round() / 1000.0;
+    if r == 0.0 {
+        0.0
+    } else {
+        r
+    }
 }
 
 /// Where the pin attaches, in scene coordinates.
-fn locate_pin(scene: &Scene, c: &Conn, centre: [f64; 2], warnings: &mut Vec<String>) -> Option<[f64; 2]> {
+fn locate_pin(scene: &Scene, c: &ConnView, centre: [f64; 2], warnings: &mut Vec<String>) -> Option<[f64; 2]> {
     if let Some(t) = &c.term_id {
         if let Some(bb) = scene.ids.get(t) {
             return Some([(bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0]);
@@ -490,9 +673,9 @@ pub fn list_fritzing_files(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Pretty printed `.part` JSON with a trailing newline.
+/// Canonical `.part` text (the shared writer, see `write::part_to_string`).
 pub fn part_json(part: &PartDef) -> Result<String, String> {
-    serde_json::to_string_pretty(part).map(|s| s + "\n").map_err(|e| format!("cannot serialise part: {e}"))
+    Ok(crate::write::part_to_string(part))
 }
 
 /// Import `input` and write `<type>.part` into `out_dir` (created if needed). Returns the part,
