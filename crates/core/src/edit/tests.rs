@@ -478,6 +478,98 @@ fn tidy_with_keeps_pin_vertices() {
 }
 
 #[test]
+fn merge_joins_wires_that_meet_end_to_end() {
+    let l = lib();
+    let mut c = Circuit {
+        wires: vec![
+            // straight on through (5,0): one wire, the redundant vertex goes
+            wire("a", View::Schematic, &[[0, 0], [5, 0]]),
+            wire("b", View::Schematic, &[[5, 0], [9, 0]]),
+            // a corner at (3,8): the vertex stays; the second wire is given backwards
+            wire("c", View::Schematic, &[[0, 8], [3, 8]]),
+            wire("d", View::Schematic, &[[3, 12], [3, 8]]),
+        ],
+        ..Circuit::default()
+    };
+    assert_eq!(merge_wires(&mut c, &l, View::Schematic), 2);
+    assert_eq!(c.wires.len(), 2);
+    assert_eq!(pts(&c, "a"), vec![[0, 0], [9, 0]]);
+    assert_eq!(pts(&c, "c"), vec![[0, 8], [3, 8], [3, 12]]);
+    assert_eq!(merge_wires(&mut c, &l, View::Schematic), 0, "nothing left to join");
+}
+
+#[test]
+fn merge_chains_keep_the_first_id_and_never_touch_other_views() {
+    let l = lib();
+    let mut c = Circuit {
+        wires: vec![
+            wire("a", View::Schematic, &[[0, 0], [2, 0]]),
+            wire("b", View::Schematic, &[[2, 0], [2, 4]]),
+            wire("c", View::Schematic, &[[2, 4], [6, 4]]),
+            wire("j", View::Breadboard, &[[0, 0], [2, 0]]),
+            wire("k", View::Breadboard, &[[2, 0], [2, 4]]),
+        ],
+        ..Circuit::default()
+    };
+    assert_eq!(merge_wires(&mut c, &l, View::Schematic), 2);
+    assert_eq!(pts(&c, "a"), vec![[0, 0], [2, 0], [2, 4], [6, 4]]);
+    assert_eq!(c.wires_in(View::Breadboard).count(), 2, "the breadboard is another view");
+    assert_eq!(merge_wires(&mut c, &l, View::Breadboard), 1, "no pin or hole at the meeting point");
+    assert_eq!(pts(&c, "j"), vec![[0, 0], [2, 0], [2, 4]]);
+}
+
+#[test]
+fn merge_keeps_the_meeting_point_as_a_vertex_where_something_is_attached() {
+    let l = lib();
+    let mut c = Circuit {
+        parts: vec![part("R1", Some([10, 10]), Some([10, 10]))],
+        wires: vec![
+            // both end on R1.b (18,11) in the schematic: one wire through the pin keeps a vertex
+            wire("a", View::Schematic, &[[14, 11], [18, 11]]),
+            wire("b", View::Schematic, &[[18, 11], [22, 11]]),
+            // a label sits at (0,5)
+            wire("p", View::Schematic, &[[-4, 5], [0, 5]]),
+            wire("q", View::Schematic, &[[0, 5], [4, 5]]),
+            // another wire ends in the middle of a join at (30,0): T-junction stays connected
+            wire("r", View::Schematic, &[[26, 0], [30, 0]]),
+            wire("s", View::Schematic, &[[30, 0], [34, 0]]),
+            wire("t", View::Schematic, &[[30, 0], [30, 6]]),
+        ],
+        labels: vec![Label { at: [0, 5], name: "N".into(), color: None }],
+        ..Circuit::default()
+    };
+    // The T at (30,0) has three ends: left alone.
+    assert_eq!(merge_wires(&mut c, &l, View::Schematic), 2);
+    assert_eq!(pts(&c, "a"), vec![[14, 11], [18, 11], [22, 11]]);
+    assert_eq!(pts(&c, "p"), vec![[-4, 5], [0, 5], [4, 5]]);
+    assert!(c.wires.iter().any(|w| w.id == "r") && c.wires.iter().any(|w| w.id == "s") && c.wires.iter().any(|w| w.id == "t"));
+}
+
+#[test]
+fn merge_never_drops_a_breadboard_hole_and_respects_colours() {
+    let l = lib();
+    let mut c = Circuit {
+        parts: vec![part("R1", Some([10, 10]), Some([10, 10]))],
+        wires: vec![
+            // both end on R1.a (10,10) of the breadboard: a vertex would not connect the hole
+            wire("a", View::Breadboard, &[[6, 10], [10, 10]]),
+            wire("b", View::Breadboard, &[[10, 10], [10, 14]]),
+            // different colours stay two wires
+            wire("c", View::Breadboard, &[[0, 0], [3, 0]]),
+            wire("d", View::Breadboard, &[[3, 0], [3, 3]]),
+        ],
+        ..Circuit::default()
+    };
+    c.wires[2].color = Some("red".into());
+    c.wires[3].color = Some("blue".into());
+    assert_eq!(merge_wires(&mut c, &l, View::Breadboard), 0);
+    assert_eq!(c.wires.len(), 4);
+    c.wires[3].color = Some("red".into());
+    assert_eq!(merge_wires(&mut c, &l, View::Breadboard), 1);
+    assert_eq!(pts(&c, "c"), vec![[0, 0], [3, 0], [3, 3]]);
+}
+
+#[test]
 fn tidy_can_be_undone_as_a_group() {
     let l = lib();
     let mut c = Circuit { wires: vec![wire("a", View::Schematic, &[[0, 0], [5, 0], [10, 0]])], ..Circuit::default() };

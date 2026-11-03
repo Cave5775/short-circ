@@ -96,7 +96,7 @@ cargo test --workspace
 
 The app can also edit circuits in both views (move, rotate and place parts, draw wires and jumpers, undo and redo, save). Edit mode: Ctrl+E; the details are under "Using the viewer" above.
 
-Tools > Autoroute... opens the same autorouter as the `--autoroute` command, so you can realise one view from the other without leaving the app. The dialog asks for the toggles first: the target view, whether the nets come from the other view or from the declared `nets`, which nets (all, only unrouted, or only those of the selected part), whether to place missing parts and keep existing wires, and the options of the chosen view (crossings, labels, clearance and preference for the schematic; crossings, jumper style, colour and maximum length for the breadboard). With "Allow wire crossings" off on the breadboard, jumpers never touch each other: each takes another shape or detours around the wires already placed, and a net that cannot be joined that way is listed as failed. It also shows the equivalent command line.
+Tools > Autoroute... opens the same autorouter as the `--autoroute` command, so you can realise one view from the other without leaving the app. The dialog asks for the toggles first: the target view, whether the nets come from the other view or from the declared `nets`, which nets (all, only unrouted, or only those of the selected part), whether to place missing parts and keep existing wires, and the options of the chosen view (crossings, labels, clearance and preference for the schematic; crossings, wires over components, moving placed components, jumper style, colour and maximum length for the breadboard; and merging wires that meet end to end for both). "Allow components to be moved" places the components again and removes the breadboard wires first, so the dialog shows a warning while it is on. With "Allow wire crossings" off on the breadboard, jumpers never touch each other: each takes another shape or detours around the wires already placed, and a net that cannot be joined that way is listed as failed. It also shows the equivalent command line.
 
 Preview runs the autorouter in the background and shows the result on the canvas, with the new parts and wires highlighted, a list of the nets that could not be routed, and no change to your circuit. Apply commits the result as one undo step (Ctrl+Z puts everything back) and switches to Edit mode so you can save it. Changing a toggle or closing the dialog discards the preview.
 
@@ -139,7 +139,7 @@ The same `short-circ.exe` runs headless when you pass one of these options. `--v
 | `short-circ.exe --validate FILE.circ [--view V\|all] [--json]` | Check a circuit and print the report. The default `all` checks every view in use plus the cross-view rules. `--json` prints JSON. |
 | `short-circ.exe --render FILE.circ OUT.svg [--view V] [--dark]` | Export an SVG image of one view (default `schematic`). `--dark` uses the dark theme. |
 | `short-circ.exe --netlist FILE.circ [--view V] [--json]` | Print every net with its name, pins (such as `R1.a`) and wire ids. |
-| `short-circ.exe --autoroute IN OUT [--to V] [--from-nets] [options]` | Place parts and draw wires in the target view (default `breadboard`) from the other view, or from the declared `nets` with `--from-nets`. Options: `--scope all\|unrouted`, `--only R1.a,B1.pos`, `--no-place`, `--replace`, `--crossings`, `--prefer bends\|length`, `--clearance N`, `--no-labels`, `--jumper straight\|orthogonal\|diagonal`, `--jumper-color by-net\|COLOUR`, `--max-jumper N`. |
+| `short-circ.exe --autoroute IN OUT [--to V] [--from-nets] [options]` | Place parts and draw wires in the target view (default `breadboard`) from the other view, or from the declared `nets` with `--from-nets`. Options: `--scope all\|unrouted`, `--only R1.a,B1.pos`, `--no-place`, `--replace`, `--crossings`, `--prefer bends\|length`, `--clearance N`, `--no-labels`, `--jumper straight\|orthogonal\|diagonal`, `--jumper-color by-net\|COLOUR`, `--max-jumper N`, `--over-parts`, `--move-parts`, `--no-merge`. |
 | `short-circ.exe --upgrade IN [OUT]` | Rewrite a `.circ` or `.part` (v1 or v2) as canonical v2, in place without `OUT`. |
 | `short-circ.exe --render-part TYPE OUT.svg [--view V] [--dark] [--circuit-dir DIR]` | Draw one part view with its pin ids labelled and its bounding box. `TYPE` resolves like it would in a circuit, including `dipN` and `headerN`. |
 | `short-circ.exe --import-fritzing IN OUT [--views schematic,breadboard] [--type NAME]` | Convert a Fritzing part (both views by default). `IN` is a `.fzpz`, a `.fzp`, or a folder of them. `OUT` is a `.part` file, or a folder when `IN` is a folder. |
@@ -217,12 +217,12 @@ crates/app/                   the viewer, editor and command-line front end (egu
 parts/                        built-in component definitions (.part), embedded in the executable
 examples/                     sample circuits (.circ)
 docs/FORMAT.md                file format specification
-.claude/skills/circuit/       optional Claude Code skill
+scripts/sync-skill.ps1        refreshes the format copy inside the optional Claude Code skill
 ```
 
 ## Optional: Claude Code skill
 
-`.claude/skills/circuit/` contains a skill that lets [Claude Code](https://claude.com/claude-code) write, autoroute, validate and render `.circ` and `.part` files using the command-line tool. It is optional. The app never depends on it. After editing `docs/FORMAT.md`, run `powershell -File scripts\sync-skill.ps1` to refresh the specification copy inside the skill.
+A skill lets [Claude Code](https://claude.com/claude-code) write, autoroute, validate and render `.circ` and `.part` files using the command-line tool. It is optional and the app never depends on it. The skill is not stored in this repository (`.claude/` is ignored); it is published with each release so that it matches that release's features. If you keep a copy at `.claude/skills/circuit/SKILL.md`, `powershell -File scripts\sync-skill.ps1` refreshes the specification copy inside it from `docs/FORMAT.md`.
 
 ## Roadmap
 

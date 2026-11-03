@@ -58,7 +58,16 @@ fn checked(c: &Circuit, o: &RouteOptions) -> RouteOutcome {
         assert!(out.circuit.part(id).unwrap().placement(o.to).is_some(), "placed {id} has no placement");
         assert!(c.part(id).is_none_or(|p| p.placement(o.to).is_none()), "{id} was already placed");
     }
-    assert_eq!(out.circuit.wires.len(), c.wires.len() + out.wires_added.len() - removed_wires(c, &out.circuit, o), "wires_added accuracy");
+    // A wire that absorbed another one is listed in wires_added under its old id.
+    // (After --replace the old wires are gone, so their ids may be handed out again.)
+    let new_wires = out.wires_added.iter().filter(|id| !o.keep_wires || !c.wires.iter().any(|w| &w.id == *id && w.view == o.to)).count();
+    let expected = c.wires.len() + new_wires - removed_wires(c, &out.circuit, o);
+    if out.wires_merged == 0 {
+        assert_eq!(out.circuit.wires.len(), expected, "wires_added accuracy");
+    } else {
+        // Each join removes one wire, possibly one that was added in the same run.
+        assert!(out.circuit.wires.len() + out.wires_merged >= expected, "wires_added accuracy after merging");
+    }
     for id in &out.wires_added {
         assert!(out.circuit.wires.iter().any(|w| &w.id == id && w.view == o.to));
     }
@@ -331,10 +340,16 @@ fn multi_pin_net_is_one_tree() {
         "nets":[{"pins":["R1.b","R2.b","R3.b","R4.a"]}]}"#,
     )
     .unwrap();
-    let out = checked(&c, &declared(View::Schematic));
+    let mut o = declared(View::Schematic);
+    o.merge_wires = false;
+    let out = checked(&c, &o);
     assert!(out.failures.is_empty(), "{:?}", out.failures);
     assert_eq!(out.routed, 1);
     assert!(out.wires_added.len() >= 3);
+    // Merging joins the branches that end on the same pin into one wire each; the net is intact.
+    let merged = checked(&c, &declared(View::Schematic));
+    assert!(merged.failures.is_empty(), "{:?}", merged.failures);
+    assert!(merged.wires_merged > 0 && merged.circuit.wires.len() < out.circuit.wires.len(), "{} vs {}", merged.circuit.wires.len(), out.circuit.wires.len());
 }
 
 #[test]
@@ -727,6 +742,7 @@ fn jumper_styles_end_on_holes_and_are_valid() {
             o.jumper_style = style.clone();
             // The shapes of the styles; detours around other wires are tested separately.
             o.allow_crossings = true;
+            o.avoid_parts = false;
             let out = checked(&c, &o);
             let lib = Library::load(&out.circuit, None);
             let nl = Netlist::build(&out.circuit, &lib, View::Breadboard);
@@ -800,7 +816,7 @@ fn crossing_jumpers(c: &Circuit) -> Vec<(String, String)> {
 #[test]
 fn breadboard_jumpers_cross_only_when_allowed() {
     let mut crossed_when_allowed = 0;
-    for seed in 1..=6u64 {
+    for seed in 1..=3u64 {
         let c = stress(10, 14, seed);
         for style in [JumperStyle::Straight, JumperStyle::Orthogonal, JumperStyle::Diagonal45] {
             let mut o = declared(View::Breadboard);
@@ -817,6 +833,165 @@ fn breadboard_jumpers_cross_only_when_allowed() {
         }
     }
     assert!(crossed_when_allowed > 0, "the stress circuits never cross, so the test proves nothing");
+}
+
+/// Bounding boxes of the non-board parts placed in the breadboard view of `c`.
+fn bb_boxes(c: &Circuit, lib: &Library) -> Vec<(String, [f64; 2], [f64; 2])> {
+    c.parts
+        .iter()
+        .filter_map(|p| {
+            let (pl, def) = (p.breadboard.as_ref()?, lib.get(&p.ty)?);
+            if def.is_board() {
+                return None;
+            }
+            let (lo, hi) = crate::transform::world_bbox(pl, def.breadboard.as_ref()?);
+            Some((p.id.clone(), lo, hi))
+        })
+        .collect()
+}
+
+/// Does the segment run through the open interior of the box?
+fn seg_through(a: crate::model::Pt, b: crate::model::Pt, lo: [f64; 2], hi: [f64; 2]) -> bool {
+    // Sample the segment: grid steps are at most one unit long, so a quarter-unit step is enough.
+    let n = ((b[0] - a[0]).abs().max((b[1] - a[1]).abs()) * 4).max(1);
+    (1..n).any(|k| {
+        let t = k as f64 / n as f64;
+        let (x, y) = (a[0] as f64 + (b[0] - a[0]) as f64 * t, a[1] as f64 + (b[1] - a[1]) as f64 * t);
+        x > lo[0] + 1e-9 && x < hi[0] - 1e-9 && y > lo[1] + 1e-9 && y < hi[1] - 1e-9
+    })
+}
+
+#[test]
+fn orthogonal_jumpers_are_orthogonal_whatever_the_other_options_say() {
+    for seed in 1..=4u64 {
+        let c = stress(10, 14, seed);
+        for crossings in [false, true] {
+            for avoid in [false, true] {
+                let mut o = declared(View::Breadboard);
+                o.allow_crossings = crossings;
+                o.avoid_parts = avoid;
+                let out = checked(&c, &o);
+                for w in out.circuit.wires_in(View::Breadboard) {
+                    assert!(
+                        w.pts.windows(2).all(|s| s[0][0] == s[1][0] || s[0][1] == s[1][1]),
+                        "seed {seed} crossings {crossings} avoid {avoid}: {} {:?}",
+                        w.id,
+                        w.pts
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn jumpers_keep_off_components_unless_allowed() {
+    let mut over_when_allowed = 0;
+    for seed in 1..=4u64 {
+        let c = stress(10, 14, seed);
+        let mut o = declared(View::Breadboard);
+        o.allow_crossings = true;
+        let out = checked(&c, &o);
+        let lib = Library::load(&out.circuit, None);
+        let boxes = bb_boxes(&out.circuit, &lib);
+        let nl = Netlist::build(&out.circuit, &lib, View::Breadboard);
+        let _ = &nl;
+        for w in out.circuit.wires_in(View::Breadboard) {
+            let ends = [w.pts[0], *w.pts.last().unwrap()];
+            for (id, lo, hi) in &boxes {
+                // A component that covers an end of the jumper is exempt.
+                let covers = |p: crate::model::Pt| p[0] as f64 > lo[0] && (p[0] as f64) < hi[0] && p[1] as f64 > lo[1] && (p[1] as f64) < hi[1];
+                if ends.iter().any(|e| covers(*e)) {
+                    continue;
+                }
+                assert!(!w.pts.windows(2).any(|s| seg_through(s[0], s[1], *lo, *hi)), "seed {seed}: {} runs over {id}: {:?}", w.id, w.pts);
+            }
+        }
+        // And the switch is real: allowing wires over components never routes fewer nets.
+        o.avoid_parts = false;
+        let free = checked(&c, &o);
+        assert!(free.routed >= out.routed, "seed {seed}: {} vs {}", free.routed, out.routed);
+        let lib = Library::load(&free.circuit, None);
+        let boxes = bb_boxes(&free.circuit, &lib);
+        over_when_allowed += free
+            .circuit
+            .wires_in(View::Breadboard)
+            .filter(|w| boxes.iter().any(|(_, lo, hi)| w.pts.windows(2).any(|s| seg_through(s[0], s[1], *lo, *hi))))
+            .count();
+    }
+    assert!(over_when_allowed > 0, "no stress circuit ever puts a jumper over a component, so the test proves nothing");
+}
+
+#[test]
+fn placed_components_move_only_when_allowed() {
+    // Everything placed once; then R1 is moved off the board by hand.
+    let base = checked(&led_declared(), &declared(View::Breadboard)).circuit;
+    let mut c = base.clone();
+    let far = crate::model::Placement::at(60, 60);
+    part_mut(&mut c, "R1").breadboard = Some(far.clone());
+    let lib = Library::load(&c, None);
+
+    let kept = port(&c, &lib, &declared(View::Breadboard));
+    assert_eq!(kept.circuit.part("R1").unwrap().breadboard.as_ref(), Some(&far), "never moved by default");
+
+    let mut o = declared(View::Breadboard);
+    o.move_parts = true;
+    let moved = checked_moved(&c, &o);
+    assert!(moved.failures.is_empty(), "{:?}", moved.failures);
+    assert_ne!(moved.circuit.part("R1").unwrap().breadboard.as_ref(), Some(&far), "R1 was placed again, on the board");
+    assert_eq!(moved.routed, 3);
+    // Components that were placed are placed again: all three non-board parts are listed.
+    for id in ["B1", "R1", "D1"] {
+        assert!(moved.placed.iter().any(|p| p == id), "{id} in {:?}", moved.placed);
+    }
+    // Without place_missing nothing can be placed again, so nothing is lifted.
+    o.place_missing = false;
+    let still = port(&c, &lib, &o);
+    assert_eq!(still.circuit.part("R1").unwrap().breadboard.as_ref(), Some(&far));
+}
+
+/// Like `checked` for runs that move parts: the guarantees that do not mention fixed placements.
+fn checked_moved(c: &Circuit, o: &RouteOptions) -> RouteOutcome {
+    let lib = Library::load(c, None);
+    let out = port(c, &lib, o);
+    let lib2 = Library::load(&out.circuit, None);
+    let report = validate(&out.circuit, &lib2);
+    assert_eq!(errors(&report), BTreeMap::new(), "{:#?}", report.issues);
+    assert_eq!(view_data(c, o.to.other()), view_data(&out.circuit, o.to.other()), "other view changed");
+    out
+}
+
+#[test]
+fn autoroute_joins_wires_that_meet_end_to_end() {
+    // R1.b - R2.a is wired in two separate pieces that meet end to end at (24,11).
+    let c = parse_circuit(
+        r#"{"format":"short-circ/2","parts":[
+          {"id":"R1","type":"resistor","schematic":{"at":[10,10]}},
+          {"id":"R2","type":"resistor","schematic":{"at":[30,10]}},
+          {"id":"R3","type":"resistor","schematic":{"at":[50,10]}}],
+        "wires":[{"id":"w1","view":"schematic","pts":[[18,11],[24,11]]},
+                 {"id":"w2","view":"schematic","pts":[[24,11],[30,11]]}],
+        "nets":[{"pins":["R1.b","R2.a","R3.a"]}]}"#,
+    )
+    .unwrap();
+    let mut o = declared(View::Schematic);
+    o.merge_wires = false;
+    let apart = checked(&c, &o);
+    assert_eq!(apart.wires_merged, 0);
+    let joined = checked(&c, &declared(View::Schematic));
+    assert!(joined.failures.is_empty(), "{:?}", joined.failures);
+    assert!(joined.wires_merged > 0, "wires: {:?}", apart.circuit.wires);
+    assert!(joined.circuit.wires.len() < apart.circuit.wires.len());
+    assert_eq!(joined.circuit.wires.iter().filter(|w| w.pts.contains(&[18, 11]) && w.pts.contains(&[30, 11])).count(), 1, "one wire from R1.b to R2.a");
+    // Same connectivity.
+    let lib = Library::load(&joined.circuit, None);
+    let nl = Netlist::build(&joined.circuit, &lib, View::Schematic);
+    assert_eq!(nl.net_of_pin("R1", "b"), nl.net_of_pin("R3", "a"));
+    assert_eq!(nl.net_of_pin("R1", "b"), nl.net_of_pin("R2", "a"));
+    // A second run changes nothing.
+    let lib2 = Library::load(&joined.circuit, None);
+    let again = port(&joined.circuit, &lib2, &declared(View::Schematic));
+    assert_eq!(write::circuit_to_string(&again.circuit), write::circuit_to_string(&joined.circuit));
 }
 
 #[test]

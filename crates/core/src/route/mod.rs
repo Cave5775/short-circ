@@ -96,6 +96,16 @@ pub struct RouteOptions {
     pub jumper_color: JumperColor,
     /// Breadboard: longest jumper allowed, in grid units; `None` is unlimited.
     pub max_jumper_len: Option<i32>,
+    /// Breadboard: keep jumpers off the bodies of components (a jumper may still start or end
+    /// under a component that covers its hole). When false a jumper may pass over components,
+    /// though a route that does not is still preferred.
+    pub avoid_parts: bool,
+    /// Breadboard: allow components already placed to be moved. They are placed again from
+    /// scratch and the breadboard wires are removed (they would no longer meet the pins). Needs
+    /// `place_missing`. When false, placed components never move.
+    pub move_parts: bool,
+    /// Join wires of the target view that meet end to end into one wire.
+    pub merge_wires: bool,
 }
 
 impl Default for RouteOptions {
@@ -113,6 +123,9 @@ impl Default for RouteOptions {
             jumper_style: JumperStyle::Orthogonal,
             jumper_color: JumperColor::ByNet,
             max_jumper_len: None,
+            avoid_parts: true,
+            move_parts: false,
+            merge_wires: true,
         }
     }
 }
@@ -131,8 +144,10 @@ pub struct RouteOutcome {
     pub circuit: Circuit,
     /// Ids of parts that were placed.
     pub placed: Vec<String>,
-    /// Ids of wires that were added.
+    /// Ids of wires that were added, or that absorbed an added wire when wires were merged.
     pub wires_added: Vec<String>,
+    /// Wires of the target view joined into others (`merge_wires`), existing ones included.
+    pub wires_merged: usize,
     /// Nets realised completely.
     pub routed: usize,
     pub failures: Vec<RouteFailure>,
@@ -184,7 +199,25 @@ pub fn port(circuit: &Circuit, lib: &dyn PartLookup, opts: &RouteOptions) -> Rou
         View::Schematic => sch::run(&mut c, lib, opts, nets, &mut acc),
         View::Breadboard => bb::run(&mut c, lib, opts, nets, &mut acc),
     }
-    RouteOutcome { circuit: c, placed: acc.placed, wires_added: acc.wires_added, routed: acc.routed, failures: acc.failures }
+    let mut wires_merged = 0;
+    if opts.merge_wires {
+        let before: HashMap<String, Vec<Pt>> =
+            c.wires.iter().filter(|w| w.view == opts.to).map(|w| (w.id.clone(), w.pts.clone())).collect();
+        wires_merged = crate::edit::merge_wires(&mut c, lib, opts.to);
+        if wires_merged > 0 {
+            // A wire that absorbed another counts as added when it, or what it absorbed, was new.
+            let now: HashMap<&str, &Vec<Pt>> = c.wires.iter().filter(|w| w.view == opts.to).map(|w| (w.id.as_str(), &w.pts)).collect();
+            let mut added: Vec<String> = acc.wires_added.iter().filter(|id| now.contains_key(id.as_str())).cloned().collect();
+            for w in c.wires.iter().filter(|w| w.view == opts.to) {
+                let grew = before.get(&w.id).is_some_and(|old| *old != w.pts);
+                if grew && !added.contains(&w.id) {
+                    added.push(w.id.clone());
+                }
+            }
+            acc.wires_added = added;
+        }
+    }
+    RouteOutcome { circuit: c, placed: acc.placed, wires_added: acc.wires_added, wires_merged, routed: acc.routed, failures: acc.failures }
 }
 
 // ---- shared helpers ----------------------------------------------------------------------

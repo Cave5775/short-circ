@@ -241,8 +241,11 @@ Options (`RouteOptions`), with CLI flag and default:
 | breadboard: jumper shape | `--jumper straight\|orthogonal\|diagonal` (`diagonal45` is an alias of `diagonal`) | `orthogonal` |
 | breadboard: jumper colour | `--jumper-color by-net\|<colour>` | `by-net` |
 | breadboard: longest jumper (Manhattan length, grid units) | `--max-jumper N` | unlimited |
+| breadboard: allow jumpers over component bodies | `--over-parts` | off (jumpers keep off components) |
+| breadboard: allow placed components to be moved | `--move-parts` | off |
+| join wires that meet end to end | `--no-merge` to disable | on |
 
-Rules: schematic routing is orthogonal on the grid and avoids part bodies (plus clearance), foreign pins and foreign wires, so it introduces no `wire-overlap`, `wire-through-pin` or accidental connection; with crossings off it also introduces no `wire-crossing`. Breadboard placement puts ICs astride the board's centre gap, passives bridging strips, and each pin in its own hole (no `pin-conflict`); leftover nets get jumpers; with crossings off a jumper never touches another breadboard wire (it takes another shape, then a detour with orthogonal bends, and a net that cannot is reported `failed NET: every jumper route would cross another wire`). Parts already placed in the target view are never moved.
+Rules: schematic routing is orthogonal on the grid and avoids part bodies (plus clearance), foreign pins and foreign wires, so it introduces no `wire-overlap`, `wire-through-pin` or accidental connection; with crossings off it also introduces no `wire-crossing`. Breadboard placement puts ICs astride the board's centre gap, passives bridging strips, and each pin in its own hole (no `pin-conflict`); leftover nets get jumpers; with crossings off a jumper never touches another breadboard wire (it takes another shape, then a detour with orthogonal bends, and a net that cannot is reported `failed NET: every jumper route would cross another wire`). Parts already placed in the target view are never moved, unless `--move-parts` is given: then the components of the routed nets are placed again from scratch (boards stay) and all breadboard wires are removed first, because they would no longer meet the pins; it has no effect with `--no-place`. An `orthogonal` jumper always has horizontal and vertical segments only. With components avoided (the default) a jumper may still start or end under a component that covers its hole. After routing, wires of the target view that meet end to end (exactly two ends, same colour) are joined into one wire, existing wires included; the join keeps a vertex where a pin, label or other wire touches the meeting point, and breadboard wires are never joined on a hole.
 
 Reference-implementation details:
 - Scope: a net that is already fully connected in the target view counts as routed under `all` and is skipped under `unrouted`. `--only` wins over `--scope`. `--replace` also drops labels that sat on the removed wires.
@@ -269,7 +272,7 @@ Views: `--view schematic|breadboard` where noted; omitted means the default stat
 - `short-circ.exe --list-parts` prints resolvable component types with the views each has
 - `short-circ.exe --list-colors` prints the preset colour names with their hex codes
 - In the GUI, File > Import Fritzing part... does the same for one file and writes into `parts/` next to the open circuit (or the executable).
-The GUI never requires any of these tools, and nothing in this repo outside `.claude/skills/` refers to Claude.
+The GUI never requires any of these tools, and nothing in this repo refers to Claude except this README paragraph about the optional skill, which is published with each release rather than stored here.
 
 ## Compatibility
 `short-circ/1` files load through one upgrade function (`migrate`) and nothing else in the program knows about v1:

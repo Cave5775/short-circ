@@ -18,12 +18,33 @@ const PALETTE: [&str; 8] = ["red", "orange", "yellow", "green", "blue", "purple"
 type FRect = ([f64; 2], [f64; 2]);
 
 pub(crate) fn run(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: Vec<SrcNet>, acc: &mut Acc) {
+    if opts.move_parts && opts.place_missing {
+        lift_parts(c, lib, &nets);
+    }
     let has_board = ensure_boards(c, lib, opts, acc);
     let pre = connected_before(c, lib, &nets);
     if opts.place_missing {
         place_parts(c, lib, &nets, has_board, acc);
     }
     jumpers(c, lib, opts, &nets, &pre, acc);
+}
+
+/// `move_parts`: take the components that appear in the nets off the board so placement starts
+/// from scratch. Boards stay where they are. The breadboard wires go too: their ends were on the
+/// old pin positions and would be left hanging.
+fn lift_parts(c: &mut Circuit, lib: &dyn PartLookup, nets: &[SrcNet]) {
+    let in_nets: HashSet<&str> = nets.iter().flat_map(|n| n.pins.iter().map(|(p, _)| p.as_str())).collect();
+    let mut any = false;
+    for p in &mut c.parts {
+        let board = lib.get(&p.ty).is_some_and(|d| d.is_board());
+        if !board && p.breadboard.is_some() && in_nets.contains(p.id.as_str()) {
+            p.breadboard = None;
+            any = true;
+        }
+    }
+    if any {
+        c.wires.retain(|w| w.view != View::Breadboard);
+    }
 }
 
 fn is_board_def(lib: &dyn PartLookup, ty: &str) -> bool {
@@ -450,49 +471,39 @@ fn inside(p: Pt, r: &FRect) -> bool {
     x > r.0[0] && x < r.1[0] && y > r.0[1] && y < r.1[1]
 }
 
-fn jumper_pts(a: Pt, b: Pt, style: &JumperStyle, obstacles: &[FRect]) -> Vec<Pt> {
-    // Parts that cover an end point cannot be avoided: ignore them.
-    let obs: Vec<&FRect> = obstacles.iter().filter(|r| !inside(a, r) && !inside(b, r)).collect();
-    let clear = |m: Pt| !obs.iter().any(|r| seg_hits(a, m, r) || seg_hits(m, b, r));
+/// The shapes of the jumper style from `a` to `b`, best first. Every one obeys the style:
+/// straight is a single segment, orthogonal has horizontal and vertical segments only (never a
+/// diagonal, even when a part is in the way), 45 degree uses only 0/45/90 degree segments.
+fn style_shapes(a: Pt, b: Pt, style: &JumperStyle) -> Vec<Vec<Pt>> {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-    match style {
-        JumperStyle::Straight => vec![a, b],
-        JumperStyle::Orthogonal => {
-            if dx == 0 || dy == 0 {
-                return vec![a, b];
-            }
-            let (c1, c2) = ([a[0], b[1]], [b[0], a[1]]);
-            if clear(c1) {
-                vec![a, c1, b]
-            } else if clear(c2) {
-                vec![a, c2, b]
-            } else {
-                vec![a, b]
-            }
+    let ortho = || -> Vec<Vec<Pt>> {
+        if dx == 0 || dy == 0 {
+            vec![vec![a, b]]
+        } else {
+            vec![vec![a, [a[0], b[1]], b], vec![a, [b[0], a[1]], b]]
         }
+    };
+    match style {
+        JumperStyle::Straight => vec![vec![a, b]],
+        JumperStyle::Orthogonal => ortho(),
         JumperStyle::Diagonal45 => {
             if dx == 0 || dy == 0 || dx.abs() == dy.abs() {
-                return vec![a, b];
+                return vec![vec![a, b]];
             }
             let m = dx.abs().min(dy.abs());
             let (sx, sy) = (dx.signum(), dy.signum());
-            let c1 = [a[0] + sx * m, a[1] + sy * m];
-            let c2 = [b[0] - sx * m, b[1] - sy * m];
-            // Keep the 45 degree shape even when a part is in the way.
-            if !clear(c1) && clear(c2) {
-                vec![a, c2, b]
-            } else {
-                vec![a, c1, b]
-            }
+            vec![vec![a, [a[0] + sx * m, a[1] + sy * m], b], vec![a, [b[0] - sx * m, b[1] - sy * m], b]]
         }
     }
 }
 
 /// Candidate pairs per group kept when jumpers must not cross: the best one may be boxed in.
 const TRIES_PER_GROUP: usize = 8;
+/// Candidates (best first) that get the grid search when no plain shape works.
+const DETOUR_TRIES: usize = 2;
 /// Grid cells around the two ends the detour search may use, and the biggest search area.
-const DETOUR_MARGINS: [i32; 2] = [8, 24];
-const DETOUR_MAX_CELLS: i64 = 40_000;
+const DETOUR_MARGINS: [i32; 2] = [6, 16];
+const DETOUR_MAX_CELLS: i64 = 20_000;
 
 fn orient(a: Pt, b: Pt, c: Pt) -> i64 {
     ((b[0] as i64 - a[0] as i64) * (c[1] as i64 - a[1] as i64) - (b[1] as i64 - a[1] as i64) * (c[0] as i64 - a[0] as i64)).signum()
@@ -518,6 +529,9 @@ fn seg_touch(p1: Pt, p2: Pt, p3: Pt, p4: Pt) -> bool {
 struct WireMap {
     segs: Vec<(Pt, Pt)>,
     ends: HashSet<Pt>,
+    /// Points a jumper must not run over although no wire is there yet: legs standing off the
+    /// board, which a later jumper has to reach.
+    reserved: HashSet<Pt>,
 }
 
 impl WireMap {
@@ -534,46 +548,72 @@ impl WireMap {
             .copied()
             .filter(|(r, s)| r[0].max(s[0]) >= lo[0] - 1 && r[0].min(s[0]) <= hi[0] + 1 && r[1].max(s[1]) >= lo[1] - 1 && r[1].min(s[1]) <= hi[1] + 1)
             .collect();
-        WireMap { segs, ends: self.ends.clone() }
+        WireMap { segs, ends: self.ends.clone(), reserved: self.reserved.clone() }
     }
 }
 
-/// The segment `p-q` meets a wire. A wire that ends exactly on one of the jumper's own end points
-/// `ends` is already part of that junction and does not count; a bend there does.
+/// The segment `p-q` meets a wire or runs over a reserved point. A wire that ends exactly on one
+/// of the jumper's own end points `ends` is already part of that junction and does not count; a
+/// bend there does.
 fn blocked(p: Pt, q: Pt, wires: &WireMap, ends: [Pt; 2]) -> bool {
     wires.segs.iter().any(|&(r, s)| {
         let own = ends.iter().any(|e| wires.ends.contains(e) && (*e == r || *e == s));
         !own && seg_touch(p, q, r, s)
-    })
+    }) || wires.reserved.iter().any(|r| !ends.contains(r) && orient(p, q, *r) == 0 && in_box(p, q, *r))
 }
 
 fn path_crosses(path: &[Pt], wires: &WireMap, ends: [Pt; 2]) -> bool {
     path.windows(2).any(|w| blocked(w[0], w[1], wires, ends))
 }
 
-/// Points of the jumper from `a` to `b`: the style's shape; when crossings are not allowed and that
-/// shape hits another wire, another simple shape, else a search around the wires on the grid.
-fn jumper_path(a: Pt, b: Pt, opts: &RouteOptions, obstacles: &[FRect], wires: &WireMap) -> Option<Vec<Pt>> {
-    let first = jumper_pts(a, b, &opts.jumper_style, obstacles);
-    if opts.allow_crossings || !path_crosses(&first, wires, [a, b]) {
-        return Some(first);
+/// Points of the jumper from `a` to `b`. The shapes of the style are tried in order and the first
+/// that is allowed wins: it must keep off the other wires unless crossings are allowed, and off
+/// component bodies when `avoid_parts` is set (otherwise a shape clear of components is only
+/// preferred). When none is allowed, a straight style also tries right-angle shapes, and then a
+/// search on the grid goes around the wires and components; that search only makes right
+/// angles, so an orthogonal jumper is orthogonal in every case. `None` when nothing is allowed.
+fn jumper_path(a: Pt, b: Pt, opts: &RouteOptions, obstacles: &[FRect], wires: &WireMap, search: bool) -> Option<Vec<Pt>> {
+    // A component that covers an end point cannot be avoided: ignore it.
+    let bodies: Vec<&FRect> = obstacles.iter().filter(|r| !inside(a, r) && !inside(b, r)).collect();
+    let over_part = |p: &[Pt]| p.windows(2).any(|w| bodies.iter().any(|r| seg_hits(w[0], w[1], r)));
+    let crosses = |p: &[Pt]| !opts.allow_crossings && path_crosses(p, wires, [a, b]);
+    let primary = style_shapes(a, b, &opts.jumper_style);
+    // Right angles are the fallback of the other styles; an orthogonal jumper has no other kind.
+    let fallback = if opts.jumper_style == JumperStyle::Orthogonal { Vec::new() } else { style_shapes(a, b, &JumperStyle::Orthogonal) };
+    let clear = |s: &&Vec<Pt>| !crosses(s) && !over_part(s);
+    let allowed = |s: &&Vec<Pt>| !crosses(s);
+    if let Some(s) = primary.iter().find(clear) {
+        return Some(s.clone());
     }
-    let mut alts: Vec<Vec<Pt>> = vec![vec![a, b]];
-    if a[0] != b[0] && a[1] != b[1] {
-        alts.push(vec![a, [a[0], b[1]], b]);
-        alts.push(vec![a, [b[0], a[1]], b]);
+    if !opts.avoid_parts {
+        // Over a component is allowed: take the style's own shape rather than bending it.
+        if let Some(s) = primary.iter().find(allowed) {
+            return Some(s.clone());
+        }
     }
-    alts.into_iter().find(|p| !path_crosses(p, wires, [a, b])).or_else(|| detour(a, b, obstacles, wires))
+    if let Some(s) = fallback.iter().find(clear) {
+        return Some(s.clone());
+    }
+    if !opts.avoid_parts {
+        if let Some(s) = fallback.iter().find(allowed) {
+            return Some(s.clone());
+        }
+    }
+    if search {
+        return detour(a, b, obstacles, wires, opts.avoid_parts);
+    }
+    None
 }
 
-/// Cheapest orthogonal path from `a` to `b` whose unit steps meet no wire of `segs`: bends and
-/// steps over part bodies cost extra. `None` when walled in.
-fn detour(a: Pt, b: Pt, obstacles: &[FRect], wires: &WireMap) -> Option<Vec<Pt>> {
+/// Cheapest orthogonal path from `a` to `b` whose unit steps meet no wire of `wires`; bends cost
+/// extra, and steps over component bodies are either forbidden (`avoid_parts`) or cost extra.
+/// `None` when walled in.
+fn detour(a: Pt, b: Pt, obstacles: &[FRect], wires: &WireMap, avoid_parts: bool) -> Option<Vec<Pt>> {
     // Close to the ends first (short jumpers); a wider search only when that is walled in.
-    DETOUR_MARGINS.iter().find_map(|&m| detour_within(a, b, obstacles, wires, m))
+    DETOUR_MARGINS.iter().find_map(|&m| detour_within(a, b, obstacles, wires, avoid_parts, m))
 }
 
-fn detour_within(a: Pt, b: Pt, obstacles: &[FRect], wires: &WireMap, margin: i32) -> Option<Vec<Pt>> {
+fn detour_within(a: Pt, b: Pt, obstacles: &[FRect], wires: &WireMap, avoid_parts: bool, margin: i32) -> Option<Vec<Pt>> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
     let (lo, hi) = ([a[0].min(b[0]) - margin, a[1].min(b[1]) - margin], [a[0].max(b[0]) + margin, a[1].max(b[1]) + margin]);
@@ -589,12 +629,14 @@ fn detour_within(a: Pt, b: Pt, obstacles: &[FRect], wires: &WireMap, margin: i32
     let mut dist: HashMap<(Pt, u8), i32> = HashMap::new();
     let mut from: HashMap<(Pt, u8), (Pt, u8)> = HashMap::new();
     let mut heap = BinaryHeap::new();
+    // A*: a step costs at least STEP, so STEP times the Manhattan distance never overestimates.
+    let h = |p: Pt| STEP * ((p[0] - b[0]).abs() + (p[1] - b[1]).abs());
     for d in 0..4u8 {
         dist.insert((a, d), 0);
-        heap.push(Reverse((0, a, d)));
+        heap.push(Reverse((h(a), 0, a, d)));
     }
     let mut goal: Option<(Pt, u8)> = None;
-    while let Some(Reverse((cost, p, d))) = heap.pop() {
+    while let Some(Reverse((_, cost, p, d))) = heap.pop() {
         if dist.get(&(p, d)).is_some_and(|&best| best < cost) {
             continue;
         }
@@ -607,6 +649,9 @@ fn detour_within(a: Pt, b: Pt, obstacles: &[FRect], wires: &WireMap, margin: i32
             if q[0] < lo[0] || q[0] > hi[0] || q[1] < lo[1] || q[1] > hi[1] || blocked(p, q, &near, [a, b]) {
                 continue;
             }
+            if avoid_parts && body.iter().any(|r| seg_hits(p, q, r)) {
+                continue;
+            }
             let turn = if p != a && nd as u8 != d { BEND } else { 0 };
             let over = if body.iter().any(|r| inside(q, r)) { OVER_PART } else { 0 };
             let next = cost + STEP + turn + over;
@@ -614,7 +659,7 @@ fn detour_within(a: Pt, b: Pt, obstacles: &[FRect], wires: &WireMap, margin: i32
             if dist.get(&key).is_none_or(|&best| next < best) {
                 dist.insert(key, next);
                 from.insert(key, (p, d));
-                heap.push(Reverse((next, q, nd as u8)));
+                heap.push(Reverse((next + h(q), next, q, nd as u8)));
             }
         }
     }
@@ -677,6 +722,7 @@ fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[S
     for w in c.wires.iter().filter(|w| w.view == View::Breadboard) {
         wire_map.add(&w.pts);
     }
+    wire_map.reserved = class_loose.values().flatten().copied().collect();
     // Usable attach points of a set of strips: free holes plus loose pins.
     let points = |classes: &[usize], occupied: &HashSet<Pt>| -> Vec<Pt> {
         let mut v: Vec<Pt> = Vec::new();
@@ -731,9 +777,10 @@ fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[S
             let mut cands: Vec<((i32, i32, Pt, Pt), usize)> = Vec::new();
             let mut too_long: Option<i32> = None;
             let mut no_hole = false;
-            let keep = if opts.allow_crossings { 1 } else { TRIES_PER_GROUP };
+            let keep = if opts.allow_crossings && !opts.avoid_parts { 1 } else { TRIES_PER_GROUP };
             // Without crossings an end must not sit under another wire (a bend or the middle of one).
             let clear_of_wires = |v: Vec<Pt>| -> Vec<Pt> {
+                // (Also keeps the ends of the best pairs from sitting under another wire.)
                 if opts.allow_crossings {
                     v
                 } else {
@@ -766,13 +813,28 @@ fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[S
                 cands.extend(keys.into_iter().filter(|k| k.0 <= max).take(keep).map(|k| (k, ri)));
             }
             cands.sort_unstable();
-            let chosen = cands.iter().find_map(|((_, _, a, b), ri)| {
-                jumper_path(*a, *b, opts, &obstacles, &wire_map).map(|pts| (*a, *b, *ri, pts))
-            });
+            // Plain shapes for every candidate first; the grid search only for the best few.
+            let chosen = cands
+                .iter()
+                .find_map(|((_, _, a, b), ri)| jumper_path(*a, *b, opts, &obstacles, &wire_map, false).map(|pts| (*a, *b, *ri, pts)))
+                .or_else(|| {
+                    cands.iter().take(DETOUR_TRIES).find_map(|((_, _, a, b), ri)| {
+                        jumper_path(*a, *b, opts, &obstacles, &wire_map, true).map(|pts| (*a, *b, *ri, pts))
+                    })
+                });
             let Some((a, b, ri, pts)) = chosen else {
                 failure = Some(match (too_long, no_hole, cands.is_empty()) {
                     (Some(d), _, true) => format!("jumper too long ({d} > {})", opts.max_jumper_len.unwrap_or(0)),
-                    (_, _, false) => "every jumper route would cross another wire (allow wire crossings to join it)".to_string(),
+                    (_, _, false) => {
+                        let mut what: Vec<&str> = Vec::new();
+                        if !opts.allow_crossings {
+                            what.push("another wire");
+                        }
+                        if opts.avoid_parts {
+                            what.push("a component");
+                        }
+                        format!("every jumper route would cross {} (relax that option to join this net)", what.join(" or "))
+                    }
                     _ => "no free hole in the strip".to_string(),
                 });
                 break;
@@ -845,7 +907,7 @@ mod tests {
         // A long vertical wire stands between the ends.
         let wall = map(&[&[[5, -6], [5, 6]]]);
         let (a, b) = ([0, 0], [10, 0]);
-        let path = detour(a, b, &[], &wall).expect("a way around exists");
+        let path = detour(a, b, &[], &wall, false).expect("a way around exists");
         assert_eq!((path[0], *path.last().unwrap()), (a, b));
         assert!(!path_crosses(&path, &wall, [a, b]), "{path:?}");
         assert!(path.len() > 2, "not a straight line: {path:?}");
@@ -858,7 +920,7 @@ mod tests {
         // The target sits inside a closed box of wires.
         let (a, b) = ([0, 0], [20, 0]);
         let ring = map(&[&[[18, -2], [22, -2], [22, 2], [18, 2], [18, -2]]]);
-        assert!(detour(a, b, &[], &ring).is_none());
+        assert!(detour(a, b, &[], &ring, false).is_none());
     }
 
     #[test]
@@ -866,9 +928,53 @@ mod tests {
         let wall = map(&[&[[5, -6], [5, 6]]]);
         let (a, b) = ([0, 0], [10, 0]);
         let mut o = RouteOptions { jumper_style: JumperStyle::Straight, allow_crossings: true, ..RouteOptions::default() };
-        assert_eq!(jumper_path(a, b, &o, &[], &wall), Some(vec![a, b]), "crossings allowed: the style's shape");
+        assert_eq!(jumper_path(a, b, &o, &[], &wall, true), Some(vec![a, b]), "crossings allowed: the style's shape");
         o.allow_crossings = false;
-        let p = jumper_path(a, b, &o, &[], &wall).unwrap();
+        let p = jumper_path(a, b, &o, &[], &wall, true).unwrap();
         assert!(p.len() > 2 && !path_crosses(&p, &wall, [a, b]), "{p:?}");
+    }
+
+    fn orthogonal(p: &[Pt]) -> bool {
+        p.windows(2).all(|w| w[0][0] == w[1][0] || w[0][1] == w[1][1])
+    }
+
+    #[test]
+    fn orthogonal_jumpers_are_never_diagonal_even_with_parts_in_the_way() {
+        // Parts sit on both L shapes between the ends, so neither corner is clear.
+        let (a, b) = ([0, 0], [10, 8]);
+        let parts: Vec<FRect> = vec![([-1.0, 2.0], [3.0, 6.0]), ([7.0, 2.0], [11.0, 6.0])];
+        for avoid in [false, true] {
+            for style in [JumperStyle::Orthogonal, JumperStyle::Straight, JumperStyle::Diagonal45] {
+                let o = RouteOptions { jumper_style: style.clone(), avoid_parts: avoid, ..RouteOptions::default() };
+                let p = jumper_path(a, b, &o, &parts, &WireMap::default(), true).expect("a route exists");
+                assert_eq!((p[0], *p.last().unwrap()), (a, b));
+                if style == JumperStyle::Orthogonal {
+                    assert!(orthogonal(&p), "avoid {avoid}: {p:?}");
+                }
+                if avoid {
+                    assert!(!p.windows(2).any(|w| parts.iter().any(|r| seg_hits(w[0], w[1], r))), "{style:?}: {p:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_part_covering_an_end_does_not_block_the_jumper() {
+        // The end b sits under the part: it cannot be avoided and must not make routing fail.
+        let (a, b) = ([0, 0], [6, 0]);
+        let parts: Vec<FRect> = vec![([4.0, -2.0], [8.0, 2.0])];
+        let o = RouteOptions { avoid_parts: true, ..RouteOptions::default() };
+        assert_eq!(jumper_path(a, b, &o, &parts, &WireMap::default(), true), Some(vec![a, b]));
+    }
+
+    #[test]
+    fn avoid_parts_off_takes_the_first_shape_over_a_part_when_nothing_is_clear() {
+        let (a, b) = ([0, 0], [10, 0]);
+        let parts: Vec<FRect> = vec![([4.0, -1.0], [6.0, 1.0])];
+        let off = RouteOptions { avoid_parts: false, jumper_style: JumperStyle::Straight, ..RouteOptions::default() };
+        assert_eq!(jumper_path(a, b, &off, &parts, &WireMap::default(), true), Some(vec![a, b]), "straight over the part");
+        let on = RouteOptions { avoid_parts: true, ..off };
+        let p = jumper_path(a, b, &on, &parts, &WireMap::default(), true).unwrap();
+        assert!(!p.windows(2).any(|w| parts.iter().any(|r| seg_hits(w[0], w[1], r))), "{p:?}");
     }
 }

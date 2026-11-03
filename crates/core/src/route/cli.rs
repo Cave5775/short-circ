@@ -112,6 +112,18 @@ pub fn parse_args(args: &[String]) -> Result<(Vec<String>, RouteOptions), String
                     return Err(format!("--jumper-color: \"{v}\" is not by-net or a colour (see --list-colors)"));
                 };
             }
+            "--over-parts" => {
+                o.avoid_parts = false;
+                takes_value = false;
+            }
+            "--move-parts" => {
+                o.move_parts = true;
+                takes_value = false;
+            }
+            "--no-merge" => {
+                o.merge_wires = false;
+                takes_value = false;
+            }
             "--max-jumper" => o.max_jumper_len = Some(parse_int(need(args, i, a)?, a, 1, MAX_JUMPER)?),
             _ if a.starts_with("--") => return Err(format!("unknown option {a}")),
             _ => {
@@ -191,6 +203,15 @@ pub fn options_to_args(o: &RouteOptions) -> Vec<String> {
     if let Some(n) = o.max_jumper_len {
         flag("--max-jumper", Some(n.to_string()));
     }
+    if !o.avoid_parts {
+        flag("--over-parts", None);
+    }
+    if o.move_parts {
+        flag("--move-parts", None);
+    }
+    if !o.merge_wires {
+        flag("--no-merge", None);
+    }
     a
 }
 
@@ -237,9 +258,10 @@ pub fn run_with(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i3
     for f in &outcome.failures {
         let _ = writeln!(out, "failed {}: {}", f.net, f.reason);
     }
+    let merged = if outcome.wires_merged > 0 { format!(", merged {} wire(s)", outcome.wires_merged) } else { String::new() };
     let _ = writeln!(
         out,
-        "placed {} part(s), added {} wire(s), routed {} net(s), {} failed",
+        "placed {} part(s), added {} wire(s), routed {} net(s), {} failed{merged}",
         outcome.placed.len(),
         outcome.wires_added.len(),
         outcome.routed,
@@ -270,9 +292,10 @@ mod tests {
     fn every_flag_is_parsed() {
         let o = parse_options(&args(
             "--to schematic --from-nets --scope unrouted --no-place --replace --crossings --prefer length --clearance 3 \
-             --no-labels --jumper diagonal --jumper-color teal --max-jumper 12",
+             --no-labels --jumper diagonal --jumper-color teal --max-jumper 12 --over-parts --move-parts --no-merge",
         ))
         .unwrap();
+        assert!(!o.avoid_parts && o.move_parts && !o.merge_wires);
         assert_eq!(o.to, View::Schematic);
         assert_eq!(o.source, Source::Declared);
         assert_eq!(o.scope, Scope::Unrouted);
@@ -338,7 +361,13 @@ mod tests {
                 jumper_style: JumperStyle::Diagonal45,
                 jumper_color: JumperColor::Single("red".into()),
                 max_jumper_len: Some(9),
+                avoid_parts: false,
+                move_parts: true,
+                merge_wires: false,
             },
+            RouteOptions { avoid_parts: false, ..d() },
+            RouteOptions { move_parts: true, ..d() },
+            RouteOptions { merge_wires: false, ..d() },
         ];
         for o in sets {
             let a = options_to_args(&o);

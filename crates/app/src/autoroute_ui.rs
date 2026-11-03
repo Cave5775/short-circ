@@ -79,6 +79,8 @@ pub fn normalized(o: &RouteOptions) -> RouteOptions {
             o.jumper_style = d.jumper_style;
             o.jumper_color = d.jumper_color;
             o.max_jumper_len = d.max_jumper_len;
+            o.avoid_parts = d.avoid_parts;
+            o.move_parts = d.move_parts;
         }
         View::Breadboard => {
             o.prefer = d.prefer;
@@ -132,8 +134,9 @@ pub fn valid_jumper_color(s: &str) -> bool {
 
 /// The status line after Apply; same words as the `--autoroute` summary.
 pub fn summary_line(o: &RouteOutcome) -> String {
+    let merged = if o.wires_merged > 0 { format!(", merged {} wire(s)", o.wires_merged) } else { String::new() };
     format!(
-        "Autoroute: placed {} part(s), added {} wire(s), routed {} net(s), {} failed",
+        "Autoroute: placed {} part(s), added {} wire(s), routed {} net(s), {} failed{merged}",
         o.placed.len(),
         o.wires_added.len(),
         o.routed,
@@ -560,6 +563,9 @@ impl AutorouteUi {
             );
         }
 
+        ui.checkbox(&mut self.opts.merge_wires, "Merge wires that meet end to end")
+            .on_hover_text("Join wires of the target view that meet end to end into one wire, including wires that were already there");
+
         // Options of the chosen target only.
         match to {
             View::Schematic => {
@@ -582,6 +588,25 @@ impl AutorouteUi {
                 ui.separator();
                 ui.checkbox(&mut self.opts.allow_crossings, "Allow wire crossings")
                     .on_hover_text("Jumpers may pass over other jumpers. Off: each jumper detours around the wires already placed, and a net that cannot is reported");
+                let mut over = !self.opts.avoid_parts;
+                if ui
+                    .checkbox(&mut over, "Allow wires over components")
+                    .on_hover_text("Off: jumpers keep off the bodies of components (they may still end under one that covers their hole)")
+                    .changed()
+                {
+                    self.opts.avoid_parts = !over;
+                }
+                let can_move = self.opts.place_missing;
+                ui.add_enabled_ui(can_move, |ui| {
+                    ui.checkbox(&mut self.opts.move_parts, "Allow components to be moved")
+                        .on_hover_text("Place the components again from scratch. The breadboard wires are removed first, because they would no longer meet the pins");
+                    if self.opts.move_parts && can_move {
+                        ui.label(
+                            RichText::new("Warning: placed components move and all breadboard wires are removed first.")
+                                .color(Color32::from_rgb(235, 175, 40)),
+                        );
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label("Jumper style:");
                     ui.radio_value(&mut self.opts.jumper_style, JumperStyle::Straight, "Straight");
@@ -686,6 +711,11 @@ impl AutorouteUi {
             for (name, n) in [("Parts placed", o.placed.len()), ("Wires added", o.wires_added.len()), ("Nets routed", o.routed), ("Nets failed", o.failures.len())] {
                 ui.label(name);
                 ui.label(n.to_string());
+                ui.end_row();
+            }
+            if o.wires_merged > 0 {
+                ui.label("Wires merged");
+                ui.label(o.wires_merged.to_string());
                 ui.end_row();
             }
         });

@@ -483,6 +483,68 @@ fn tidy_impl(c: &mut Circuit, lib: Option<&dyn PartLookup>, view: View) {
     c.wires.retain(|w| w.view != view || w.pts.len() >= 2);
 }
 
+/// Join wires of `view` that meet end to end into one wire; returns how many joins were made.
+///
+/// Two wires are joined where exactly their two ends (and no third wire's end) meet, they have
+/// the same colour, and connectivity cannot change: the joined wire keeps a vertex at the meeting
+/// point `p` unless nothing else touches `p` and the wire runs straight through it. In the
+/// breadboard view a vertex does not connect to a hole, so ends that sit on a pin (a hole or a
+/// leg) are never joined. The wire with the earlier position in the file keeps its id and
+/// absorbs the other one.
+pub fn merge_wires(c: &mut Circuit, lib: &dyn PartLookup, view: View) -> usize {
+    use std::collections::{BTreeMap, HashSet};
+    let mut joins = 0;
+    loop {
+        let mut pins: HashSet<Pt> = HashSet::new();
+        for p in &c.parts {
+            if let Some(pl) = p.placement(view) {
+                pins.extend(pin_positions(lib, &p.ty, view, pl).into_iter().map(|(_, q)| q));
+            }
+        }
+        let labels: HashSet<Pt> = if view == View::Schematic { c.labels.iter().map(|l| l.at).collect() } else { HashSet::new() };
+        // Where wires end: point -> (wire index, it is the wire's first point).
+        let mut ends: BTreeMap<Pt, Vec<(usize, bool)>> = BTreeMap::new();
+        for (i, w) in c.wires.iter().enumerate().filter(|(_, w)| w.view == view) {
+            if let (Some(a), Some(b)) = (w.pts.first(), w.pts.last()) {
+                if w.pts.len() >= 2 {
+                    ends.entry(*a).or_default().push((i, true));
+                    ends.entry(*b).or_default().push((i, false));
+                }
+            }
+        }
+        let found = ends.iter().find_map(|(p, e)| {
+            let ok = e.len() == 2
+                && e[0].0 != e[1].0
+                && c.wires[e[0].0].color == c.wires[e[1].0].color
+                && (view == View::Schematic || !pins.contains(p));
+            ok.then(|| (*p, e[0].0.min(e[1].0), e[0].0.max(e[1].0)))
+        });
+        let Some((p, i, j)) = found else { return joins };
+        let mut a = c.wires[i].pts.clone();
+        if a.first() == Some(&p) {
+            a.reverse();
+        }
+        let mut b = c.wires[j].pts.clone();
+        if b.last() == Some(&p) {
+            b.reverse();
+        }
+        let at = a.len() - 1;
+        a.extend_from_slice(&b[1..]);
+        // Straight through, and nothing else there: the vertex is redundant.
+        let touched = pins.contains(&p)
+            || labels.contains(&p)
+            || c.wires.iter().enumerate().any(|(k, w)| {
+                w.view == view && k != i && k != j && (w.pts.contains(&p) || w.pts.windows(2).any(|s| on_segment(s[0], s[1], p)))
+            });
+        if !touched && collinear_same_dir(a[at - 1], a[at], a[at + 1]) {
+            a.remove(at);
+        }
+        c.wires[i].pts = a;
+        c.wires.remove(j);
+        joins += 1;
+    }
+}
+
 // ---- history ------------------------------------------------------------------------------
 
 const MAX_UNDO: usize = 200;
