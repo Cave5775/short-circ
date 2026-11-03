@@ -65,7 +65,8 @@ cargo test --workspace
 - Press F, or use View > Fit to window, to fit the whole circuit in the window.
 - The View menu toggles the grid, the dark theme (on by default), the issues panel, the nets panel and the part browser.
 - View > Labels shows or hides part references, part values, wire ids and pin names. Text that would be smaller than 7 pixels is hidden automatically.
-- Shortcuts: Ctrl+O open, F fit, R reload now, G toggle the grid, Esc clear the selection. Help > Shortcuts lists them.
+- Shortcuts: Ctrl+O open, F fit, R or F5 reload now, G toggle the grid, Esc clear the selection. Help > Shortcuts lists them.
+- **Edit mode** (Ctrl+E or the "Edit mode" button; View mode stays the default and read-only): select, marquee, move, nudge, rotate (R), mirror (M), delete, copy/cut/paste, a Wire tool (W), a Label tool (L, schematic), placing parts from Edit > Add part or the part browser, a properties panel (id, props, colours, placement per view, title, declared nets), undo/redo (Ctrl+Z, Ctrl+Y), File > New / Save (Ctrl+S) / Save As. It works in both the schematic and the breadboard view. Files are written in the canonical format; the title shows `*` while there are unsaved changes, live reload is suspended meanwhile (a "changed on disk" banner offers Reload or Keep), and closing or opening another file asks to Save, Discard or Cancel. In Edit mode R rotates, F5 reloads.
 
 **Hovering and clicking**
 
