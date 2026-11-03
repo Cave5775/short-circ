@@ -12,18 +12,7 @@ pub fn new_circuit() -> Circuit {
 /// Write the circuit in canonical form. The file is written next to its target and renamed over
 /// it, so a crash never leaves half a file.
 pub fn save_circuit(path: &Path, c: &Circuit) -> Result<(), String> {
-    let text = circuit_to_string(c);
-    let tmp = {
-        let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
-        name.push(".tmp");
-        path.with_file_name(name)
-    };
-    std::fs::write(&tmp, text.as_bytes()).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("cannot save {}: {e}", path.display()));
-    }
-    Ok(())
+    short_circ_core::write::write_atomic(path, &circuit_to_string(c)).map_err(|e| format!("cannot save {}: {e}", path.display()))
 }
 
 /// Display name of a document: its file name, or `untitled`.

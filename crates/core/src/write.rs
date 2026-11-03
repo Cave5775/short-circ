@@ -28,6 +28,22 @@ pub fn part_to_string(p: &PartDef) -> String {
     out
 }
 
+/// Write `text` to `path` through a temporary file in the same directory that is renamed over
+/// the target, so a failure or a crash never leaves a half-written file and never damages an
+/// existing one. The temporary file is removed when the write or the rename fails.
+pub fn write_atomic(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = path.with_file_name(name);
+    if let Err(e) = std::fs::write(&tmp, text.as_bytes()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 // ---- primitives -------------------------------------------------------------------------
 
 fn s(v: &str) -> String {
@@ -307,10 +323,10 @@ fn write_part_def(out: &mut String, p: &PartDef, d: usize) {
         m.block("buses", p.buses.iter().map(|b| list(b, |x| s(x))).collect());
     }
     if let Some(v) = &p.schematic {
-        m.nested("schematic", view_def(v, d + 1, true));
+        m.nested("schematic", view_def(v, &p.pins, d + 1, true));
     }
     if let Some(v) = &p.breadboard {
-        m.nested("breadboard", view_def(v, d + 1, false));
+        m.nested("breadboard", view_def(v, &p.pins, d + 1, false));
     }
     if let Some(v) = &p.params {
         m.inline("params", value(v));
@@ -345,10 +361,29 @@ fn pin_pos_line(p: &PinPos, always_dir: bool) -> String {
     obj(f)
 }
 
-fn view_def(v: &ViewDef, d: usize, schematic: bool) -> String {
+/// View `pins` in the order of the part's `pins[]` (docs/FORMAT.md "Canonical writing"); keys that
+/// are not in `pins[]` (invalid files) follow in key order.
+fn view_pin_entries(v: &ViewDef, order: &[PinDef], schematic: bool) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::with_capacity(v.pins.len());
+    for def in order {
+        if let Some(p) = v.pins.get(&def.id) {
+            if !out.iter().any(|(k, _)| *k == def.id) {
+                out.push((def.id.clone(), pin_pos_line(p, schematic)));
+            }
+        }
+    }
+    for (k, p) in &v.pins {
+        if !order.iter().any(|d| d.id == *k) {
+            out.push((k.clone(), pin_pos_line(p, schematic)));
+        }
+    }
+    out
+}
+
+fn view_def(v: &ViewDef, order: &[PinDef], d: usize, schematic: bool) -> String {
     let mut m = Members::new();
     m.inline("size", fpt(v.size));
-    m.map("pins", v.pins.iter().map(|(k, p)| (k.clone(), pin_pos_line(p, schematic))).collect());
+    m.map("pins", view_pin_entries(v, order, schematic));
     if !v.shapes.is_empty() {
         m.block("shapes", v.shapes.iter().map(shape_line).collect());
     }
@@ -657,6 +692,52 @@ mod tests {
 ";
         assert_eq!(part_to_string(&p), want);
         assert_eq!(part_to_string(&crate::parse_part(want).unwrap()), want);
+    }
+
+    #[test]
+    fn view_pins_follow_the_order_of_the_pins_list() {
+        // Alphabetical order would give "1", "10", "2"; the spec order is the part's `pins[]`.
+        let src = r#"{"format":"short-circ/2","type":"t","pins":[{"id":"1"},{"id":"2"},{"id":"10"},{"id":"A"}],
+            "schematic":{"size":[4,4],"pins":{"A":{"at":[0,3],"dir":"left"},"10":{"at":[0,2],"dir":"left"},
+            "2":{"at":[0,1],"dir":"left"},"1":{"at":[0,0],"dir":"left"},"zz":{"at":[1,1],"dir":"left"},"b":{"at":[1,2],"dir":"left"}}},
+            "breadboard":{"size":[4,1],"pins":{"10":{"at":[2,0]},"1":{"at":[0,0]},"2":{"at":[1,0]}}}}"#;
+        let p = crate::parse_part(src).unwrap();
+        let w = part_to_string(&p);
+        let keys = |text: &str, view: &str| -> Vec<String> {
+            let start = text.find(&format!("\"{view}\": {{")).unwrap();
+            let pins = &text[start..];
+            let pins = &pins[pins.find("\"pins\": {").unwrap()..];
+            let pins = &pins[..pins.find("\n    }").unwrap()];
+            pins.lines().skip(1).map(|l| l.trim().split('"').nth(1).unwrap().to_string()).collect()
+        };
+        assert_eq!(keys(&w, "schematic"), ["1", "2", "10", "A", "b", "zz"], "pins[] order, then unknown keys sorted\n{w}");
+        assert_eq!(keys(&w, "breadboard"), ["1", "2", "10"], "{w}");
+        assert_eq!(w, part_to_string(&crate::parse_part(&w).unwrap()), "stable on a second write");
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("short-circ-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("out.circ");
+        write_atomic(&target, "one\n").unwrap();
+        write_atomic(&target, "two\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "two\n");
+        let names = |d: &std::path::Path| -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(names(&dir), ["out.circ"]);
+        // The rename fails when the target is a directory: the error comes back, nothing is left.
+        let blocked = dir.join("blocked.circ");
+        std::fs::create_dir(&blocked).unwrap();
+        assert!(write_atomic(&blocked, "x").is_err());
+        assert!(blocked.is_dir());
+        assert_eq!(names(&dir), ["blocked.circ", "out.circ"]);
+        // A missing directory is an error too.
+        assert!(write_atomic(&dir.join("nope").join("a.circ"), "x").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
