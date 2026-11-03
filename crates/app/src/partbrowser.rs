@@ -13,6 +13,10 @@ use short_circ_core::{Library, PartDef, Placement, View};
 #[derive(Default)]
 pub struct PartBrowser {
     pub open: bool,
+    /// Edit mode with a circuit open: show the "Place" button.
+    pub can_place: bool,
+    /// Set when the user asked to place the selected type; the app takes it.
+    pub place_request: Option<String>,
     filter: String,
     /// Text box for generated families such as `dip8` or `header4`.
     family: String,
@@ -119,6 +123,9 @@ impl PartBrowser {
     fn detail(&mut self, ui: &mut egui::Ui, def: &PartDef, dark: bool, tex: &mut TexCache) {
         let view = pick_view(def, self.view);
         ui.heading(&def.ty);
+        if self.can_place && ui.button("Place in the circuit").on_hover_text("then click in the canvas; Esc stops").clicked() {
+            self.place_request = Some(def.ty.clone());
+        }
         egui::Grid::new("part_detail").num_columns(2).show(ui, |ui| {
             ui.label("name");
             ui.label(if def.name.is_empty() { "-" } else { def.name.as_str() });

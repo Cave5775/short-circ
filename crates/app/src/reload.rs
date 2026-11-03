@@ -52,10 +52,43 @@ pub fn should_reload(prev: &Stamp, cur: &Stamp) -> bool {
     cur.file.is_some() && prev != cur
 }
 
+/// What a poll should lead to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Poll {
+    /// Nothing changed (or the file is briefly unreadable).
+    Idle,
+    /// Reload the file now.
+    Reload,
+    /// The file changed while there are unsaved edits: reloading is suspended, ask the user.
+    Conflict,
+}
+
+/// Live reload is suspended while the document is dirty: a change on disk then becomes a
+/// [`Poll::Conflict`] (the app shows a "changed on disk" banner) instead of a reload.
+pub fn decide(dirty: bool, prev: &Stamp, cur: &Stamp) -> Poll {
+    match (should_reload(prev, cur), dirty) {
+        (false, _) => Poll::Idle,
+        (true, false) => Poll::Reload,
+        (true, true) => Poll::Conflict,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn reload_is_suspended_while_dirty() {
+        let a = Stamp { file: Some((SystemTime::UNIX_EPOCH, 1)), parts: None };
+        let b = Stamp { file: Some((SystemTime::UNIX_EPOCH + Duration::from_secs(5), 1)), parts: None };
+        let gone = Stamp { file: None, parts: None };
+        assert_eq!(decide(false, &a, &a), Poll::Idle);
+        assert_eq!(decide(true, &a, &a), Poll::Idle);
+        assert_eq!(decide(false, &a, &b), Poll::Reload);
+        assert_eq!(decide(true, &a, &b), Poll::Conflict);
+        assert_eq!(decide(true, &a, &gone), Poll::Idle, "an unreadable file never asks");
+    }
 
     fn t(secs: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
