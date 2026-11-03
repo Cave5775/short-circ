@@ -99,7 +99,8 @@ A part with `category: "board"` is a carrier such as a breadboard: its pins are 
 
 ### Importing Fritzing parts
 `short-circ.exe --import-fritzing` converts a Fritzing part (`.fzpz` bundle, or `.fzp` plus its SVG files) into **one `.part` with every view the source has**:
-- `--views schematic,breadboard` (default both; either one alone is allowed). The schematic SVG becomes `schematic.shapes` (existing converter); the breadboard SVG is kept verbatim (sanitised: scripts and external references removed) as `breadboard.svg`. Real sizes come from the root `width`/`height`/`viewBox` (units `in`, `mm`, `cm`, `pt`, `pc`, `px`; unit-less lengths are 72 dpi for Illustrator exports, 96 dpi for Inkscape 0.92+, otherwise 90 dpi) scaled to the grid. For the schematic CSS `<style>` classes, `<use>`, group styles and nested transforms are honoured; SVG defaults apply (fill black, stroke none unless given).
+- `--views schematic,breadboard` (default both; either one alone is allowed). A listed view the source lacks gives a warning; it is an error only when none of the requested views can be produced. The schematic SVG becomes `schematic.shapes` (existing converter); the breadboard SVG is kept as `breadboard.svg` after sanitising (below). Real sizes come from the root `width`/`height`/`viewBox` (units `in`, `mm`, `cm`, `pt`, `pc`, `px`; unit-less lengths are 72 dpi for Illustrator exports, 96 dpi for Inkscape 0.92+, otherwise 90 dpi) scaled to the grid; the breadboard size comes from the root `width`/`height`, else from the `viewBox` size times that scale. For the schematic CSS `<style>` classes, `<use>`, group styles and nested transforms are honoured; SVG defaults apply (fill black, stroke none unless given).
+- **Sanitiser** (breadboard art). Removed: `<script>` and `<foreignObject>` elements, `on*` attributes, `javascript:` URLs, `xlink:href`/`href` values that do not start with `#` or `data:image/`, `<style>` blocks containing `@import`, `javascript:` or an external `url()`, and `xml-stylesheet` processing instructions. The only other change to the artwork is the root `viewBox` (shifted so the pins land on the grid, or added when the source has none).
 - Logical `pins[]` come from the `<connector>` list: pin `id` is the trimmed connector `name`, or the connector `id` when the name is empty or already taken (the original name is kept in `name`). A connector's position in a view is the centre of its `terminalId` element; without a terminal, the outer end of the `svgId` element if it is a long thin line, else its centre. Positions are rounded to integers (the drawing is shifted by the mean rounding error first when pins are off-grid by 0.08 unit or more), coinciding pins are nudged with a warning, and the whole view is moved so its bounding box starts at `(0,0)`. Schematic `dir` points to the nearest edge of `size`. A connector without a position in a view is omitted from that view's `pins`.
 - Fritzing `<buses>` become `buses[]`.
 - A `{ref}` text is added above the schematic body. Type name: `--type`, else a lowercase letters/digits/underscore slug of the title (then of the moduleId). A `category` of `board` is set for parts whose family property is `breadboard`.
@@ -179,15 +180,15 @@ Severity `error` unless noted. "Per view" rules run once for each view in use an
 | `wire-diagonal` (warning) | schematic | non-orthogonal segment |
 | `wire-degenerate` | per view | zero-length segment or fewer than 2 distinct points |
 | `dangling-wire` (warning) | per view | an end touches nothing (schematic: an endpoint; breadboard: an end point) |
-| `unconnected-pin` (warning) | per view | pin on no wire and no other pin (board pins and pins that are in a bus with other pins are exempt) |
+| `unconnected-pin` (warning) | per view | pin on no wire and no other pin (board pins and pins whose bus in the part definition has 2 or more members are exempt) |
 | `part-overlap` | per view | bounding boxes of two non-board parts intersect with positive area |
-| `pin-conflict` | breadboard | two or more pins of non-board parts at the same point (two legs in one hole) |
+| `pin-conflict` | breadboard | two or more pins of non-board parts at the same point (two legs in one hole); one issue per conflicting point, `ids` = the part ids |
 | `net-short` | schematic | two pins on the same net belong to a part pair that declares `props.nets` distinct, or two labels with different names join the same net |
 | `empty-net` (warning) | schematic | net with no pins |
 | `bad-color` (warning) | circuit | a colour spec (part `color`/`fill`/`label_color`, wire/label `color`, `theme.*`, a `lib` shape `stroke`/`fill`) is not a colour, `"none"` or `"default"`; `ids=[object id]` (`theme` for the theme, the type name for a `lib` shape), the message names the field and the value |
 | `net-open` (warning) | cross-view | a reference net is split into 2+ groups in a view (not yet routed there); `ids` = one pin of each group (`PART.PIN`) |
 | `net-merged` | cross-view | a view joins pins of two different reference nets; `ids` = a pin of each |
-| `unplaced-part` (warning) | cross-view | a part whose type has geometry for a view that is in use, but the part has no placement there |
+| `unplaced-part` (warning) | cross-view | a part whose type has geometry for a view that is in use, but the part has no placement there (boards included) |
 | `bad-net` | circuit | a declared `nets` pin reference names a part or pin that does not exist |
 
 ## Report format (CLI `--validate --json`)
@@ -196,13 +197,29 @@ Severity `error` unless noted. "Per view" rules run once for each view in use an
  {"rule":"wire-overlap","severity":"error","view":"schematic","ids":["w1","w2"],"at":[14,10],"message":"w1 and w2 overlap between (14,10) and (16,10)"}
 ]}
 ```
-`view` is omitted for circuit-wide and cross-view issues; `at` is `null` when there is no location. Exit code: 0 no errors (warnings allowed), 1 errors, 2 unreadable input.
+`view` is omitted for circuit-wide and cross-view issues; `at` is `null` when there is no location (always for cross-view issues). Exit code: 0 no errors (warnings allowed), 1 errors, 2 unreadable input.
+
+`--validate` with `--view all` (the default) runs every rule over the circuit; with `--view V` it runs the circuit-wide rules plus only the rules of view `V` (library `validate_view`), and skips the cross-view rules. Each per-view rule reports once per view in use.
 
 ## Canonical writing
-Every tool that writes `.circ` or `.part` (the editor, `--upgrade`, `--import-fritzing`, autorouting) uses one writer so files diff cleanly: 2-space indentation, one entry per line for `parts`, `wires`, `labels`, `nets`, part `pins` and view `pins`, stable key order (as in the examples above), no trailing spaces, a final newline. Parsing then writing the output again must give identical bytes.
+Every tool that writes `.circ` or `.part` (the editor, `--upgrade`, `--import-fritzing`, autorouting) uses one writer so files diff cleanly: 2-space indentation, top-level keys as `"key": value`, entries compact (`{"id":"R1","type":"resistor"}`, no spaces) and one per line for `parts`, `wires`, `labels`, `nets`, part `pins` and `buses`, view `pins` and `shapes`, stable key order (circuit: `format`, `title`, `parts`, `wires`, `labels`, `nets`, `theme`, `lib`; view `pins` in the order of the part's `pins[]`), no trailing spaces, a final newline. Parsing then writing the output again must give identical bytes.
+
+What the writer omits or always writes:
+- Optional fields that are `None` are omitted. Defaults are omitted: placement `rot` 0 and `mirror` false, `hidden_label` false, rect `r` 0, text `size` 1 and `anchor` `start`.
+- Always written: a part's `props` (even `{}`), a wire's `view`, `labels` and `lib` (`[]` when empty), and the `dir` of a schematic pin. A breadboard pin's `dir` is omitted when it is `left`.
+- `nets` is omitted when empty and `theme` when absent (it is written on one line).
+- Inline `lib` entries are written as full part objects, indented under `lib`.
+- Floats print without a trailing `.0` (`2`, not `2.0`).
+- The file is UTF-8 without a BOM, and a BOM makes the file unreadable, so write files without one (Windows PowerShell 5.1 `Set-Content -Encoding utf8` adds a BOM and `>` writes UTF-16; use a file-writing tool or `[IO.File]::WriteAllText` with `UTF8Encoding($false)`).
 
 ## Editing
 Edits apply to a circuit in memory and are grouped: a drag, a paste or an autoroute run is one undo step. Moving a part drags the wire ends attached to its pins in the same view. Wires never move between views and moving a part in one view never changes another view.
+
+Reference-implementation details:
+- Applying a group of edits is atomic: if any edit fails, the circuit is left unchanged.
+- Rubber-banding (moving a part with its wires) moves only a wire's first and last point, only when that point sits exactly on an old pin position of a moved part, and only for wires of the same view. Labels do not follow.
+- Splitting a wire keeps the original id for the first half; the second half gets a fresh id.
+- `tidy` (merge collinear points and drop duplicates) keeps every vertex that another wire, a label or a pin touches in the schematic; in the breadboard it merges freely.
 
 ## Autoroute and port
 `route::port` (CLI `--autoroute`, GUI dialog) realises the nets of one view in the other: it places missing parts, then draws wires. It is pure (circuit in, circuit out) and its output must pass `--validate` with no new errors; nets it cannot realise are reported with a reason, never silently dropped.
@@ -210,7 +227,7 @@ Edits apply to a circuit in memory and are grouped: a drag, a paste or an autoro
 Options (`RouteOptions`), with CLI flag and default:
 | option | flag | default |
 |---|---|---|
-| target view (`to`) | `--to schematic\|breadboard` | `breadboard` |
+| target view (`to`) | `--to schematic\|breadboard` (`sch`, `bb` accepted) | `breadboard` |
 | source of nets | `--from-nets` (declared `nets`) | the other view |
 | scope | `--scope all\|unrouted`, `--only R1.a,B1.pos` | `all` |
 | place parts missing in the target | `--no-place` to disable | on |
@@ -219,11 +236,18 @@ Options (`RouteOptions`), with CLI flag and default:
 | prefer fewer bends or shorter length | `--prefer bends\|length` | `bends` |
 | schematic: clearance around other parts (grid units) | `--clearance N` | 1 |
 | schematic: label nets that fail to route | `--no-labels` to disable | on |
-| breadboard: jumper shape | `--jumper straight\|orthogonal\|diagonal` | `orthogonal` |
+| breadboard: jumper shape | `--jumper straight\|orthogonal\|diagonal` (`diagonal45` is an alias of `diagonal`) | `orthogonal` |
 | breadboard: jumper colour | `--jumper-color by-net\|<colour>` | `by-net` |
-| breadboard: longest jumper (grid units) | `--max-jumper N` | unlimited |
+| breadboard: longest jumper (Manhattan length, grid units) | `--max-jumper N` | unlimited |
 
 Rules: schematic routing is orthogonal on the grid and avoids part bodies (plus clearance), foreign pins and foreign wires, so it introduces no `wire-overlap`, `wire-through-pin` or accidental connection; with crossings off it also introduces no `wire-crossing`. Breadboard placement puts ICs astride the board's centre gap, passives bridging strips, and each pin in its own hole (no `pin-conflict`); leftover nets get jumpers. Parts already placed in the target view are never moved.
+
+Reference-implementation details:
+- Scope: a net that is already fully connected in the target view counts as routed under `all` and is skipped under `unrouted`. `--only` wins over `--scope`. `--replace` also drops labels that sat on the removed wires.
+- Schematic placement leaves a gap between placed parts of max(4, 2 * clearance + 2 + tracks) grid units, where tracks = min(8, 2 + nets / 6), so routing channels exist.
+- Breadboard placement scores candidate positions by the number of nets that would need a jumper (weight 100 each), then by the distance to the parts they connect to.
+- Failures are printed `failed NET: reason`; when a part could not be placed at all, NET is the part id. OUT is still written and the exit code is 1.
+- Limits: with no crossings and no rotation of placed parts, nets whose pins interleave around one IC cannot all be wired planar-ly. Such nets fall back to net labels, or fail under `--no-labels`. `--crossings` lets them cross instead (the result then has `wire-crossing` warnings).
 
 ## CLI contract (`short-circ.exe`)
 Views: `--view schematic|breadboard` where noted; omitted means the default stated.
