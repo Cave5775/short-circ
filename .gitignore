@@ -2,3 +2,5 @@
 *.svg.out
 .claude/worktrees/
 .claude/settings.local.json
+.claude/CHANGELOG.md
+.claude/*.png

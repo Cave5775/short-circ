@@ -218,12 +218,11 @@ parts/                        built-in component definitions (.part), embedded i
 examples/                     sample circuits (.circ)
 docs/FORMAT.md                file format specification
 .claude/skills/circuit/       optional Claude Code skill
-.claude/CHANGELOG.md          release notes
 ```
 
 ## Optional: Claude Code skill
 
-`.claude/skills/circuit/` contains a skill that lets [Claude Code](https://claude.com/claude-code) write, autoroute, validate and render `.circ` and `.part` files using the command-line tool. It is optional. The app never depends on it. It is updated with each release so that it matches that release's features (see `.claude/CHANGELOG.md`). After editing `docs/FORMAT.md`, run `powershell -File scripts\sync-skill.ps1` to refresh the specification copy inside the skill.
+`.claude/skills/circuit/` contains a skill that lets [Claude Code](https://claude.com/claude-code) write, autoroute, validate and render `.circ` and `.part` files using the command-line tool. It is optional. The app never depends on it. It is updated with each release so that it matches that release's features. After editing `docs/FORMAT.md`, run `powershell -File scripts\sync-skill.ps1` to refresh the specification copy inside the skill.
 
 ## Roadmap
 
