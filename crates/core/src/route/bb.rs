@@ -7,7 +7,7 @@
 //! their own, so a resistor bridges two strips and a DIP straddles the centre gap).
 
 use super::nets::{can_exist, SrcNet};
-use super::{Acc, IdGen, JumperColor, JumperStyle, RouteFailure, RouteOptions, Scope};
+use super::{report_unplaced, Acc, IdGen, JumperColor, JumperStyle, RouteFailure, RouteOptions, Scope};
 use crate::model::{Circuit, Part, PartLookup, Placement, Pt, View, Wire};
 use crate::netlist::Netlist;
 use crate::transform::{pin_world, world_bbox};
@@ -43,17 +43,93 @@ fn ensure_boards(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, acc
         return false;
     }
     if let Some(i) = c.parts.iter().position(|p| p.breadboard.is_none() && is_board_def(lib, &p.ty)) {
-        c.parts[i].breadboard = Some(Placement::at(0, 0));
-        acc.placed.push(c.parts[i].id.clone());
+        let ty = c.parts[i].ty.clone();
+        let Some((at, id)) = board_origin(c, lib, &ty, &c.parts[i].id.clone(), acc) else { return false };
+        c.parts[i].breadboard = Some(Placement::at(at[0], at[1]));
+        acc.placed.push(id);
         return true;
     }
     if !is_board_def(lib, "breadboard_half") {
         return false;
     }
     let id = IdGen::new(c).fresh("BB");
-    c.parts.push(Part { id: id.clone(), ty: "breadboard_half".into(), breadboard: Some(Placement::at(0, 0)), ..Part::default() });
+    let Some((at, id)) = board_origin(c, lib, "breadboard_half", &id, acc) else { return false };
+    c.parts.push(Part { id: id.clone(), ty: "breadboard_half".into(), breadboard: Some(Placement::at(at[0], at[1])), ..Part::default() });
     acc.placed.push(id);
     true
+}
+
+/// Where to put a new board of type `ty`. Loose legs already in the breadboard view (parts placed
+/// without a board) must not land on its holes, because a strip would then join their nets: the
+/// origin (0,0) is used when that is clean, else the board is moved clear of everything placed
+/// (right, below, left, above). When no position is clean the board is added at (0,0) only if
+/// that causes no new validation error; otherwise a failure is reported and `None` returned.
+fn board_origin(c: &Circuit, lib: &dyn PartLookup, ty: &str, id: &str, acc: &mut Acc) -> Option<(Pt, String)> {
+    let def = lib.get(ty)?;
+    let vd = def.breadboard.as_ref()?;
+    let holes: Vec<Pt> = def.placed_pins(View::Breadboard).map(|(_, pos)| pin_world(&Placement::at(0, 0), pos)).collect();
+    // Points where something already sits in the breadboard view: legs and jumper ends.
+    let nl = Netlist::build(c, lib, View::Breadboard);
+    let mut blocked: HashSet<Pt> = nl.geom.pins.iter().map(|p| p.at).collect();
+    for pts in &nl.geom.wire_pts {
+        blocked.extend(pts.first().copied());
+        blocked.extend(pts.last().copied());
+    }
+    let clean = |o: Pt| !holes.iter().any(|h| blocked.contains(&[h[0] + o[0], h[1] + o[1]]));
+    if blocked.is_empty() || clean([0, 0]) {
+        return Some(([0, 0], id.to_string()));
+    }
+    let (mut lo, mut hi) = ([i32::MAX; 2], [i32::MIN; 2]);
+    for p in &blocked {
+        for k in 0..2 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    for (_, (a, b)) in part_rects(c, lib) {
+        for k in 0..2 {
+            lo[k] = lo[k].min(a[k].floor() as i32);
+            hi[k] = hi[k].max(b[k].ceil() as i32);
+        }
+    }
+    let size = [vd.size[0].ceil() as i32, vd.size[1].ceil() as i32];
+    let gap = 2;
+    let candidates = [
+        [hi[0] + gap, 0],
+        [0, hi[1] + gap],
+        [lo[0] - gap - size[0], 0],
+        [0, lo[1] - gap - size[1]],
+        [hi[0] + gap, hi[1] + gap],
+    ];
+    if let Some(o) = candidates.into_iter().find(|&o| clean(o)) {
+        return Some((o, id.to_string()));
+    }
+    // Last resort: the first position, if it adds no error.
+    let before = error_keys(c, lib);
+    let mut trial = c.clone();
+    trial.parts.push(Part { id: id.to_string(), ty: ty.to_string(), breadboard: Some(Placement::at(0, 0)), ..Part::default() });
+    if error_keys(&trial, lib).iter().all(|k| before.contains(k)) {
+        return Some(([0, 0], id.to_string()));
+    }
+    acc.failures.push(RouteFailure {
+        net: id.to_string(),
+        reason: "no clear place for a board: parts already in the breadboard view would be shorted by its strips".into(),
+    });
+    None
+}
+
+/// The validation errors of a circuit as comparable keys (rule and sorted ids).
+fn error_keys(c: &Circuit, lib: &dyn PartLookup) -> Vec<String> {
+    crate::validate::validate(c, lib)
+        .issues
+        .iter()
+        .filter(|i| i.severity == crate::model::Severity::Error)
+        .map(|i| {
+            let mut ids = i.ids.clone();
+            ids.sort();
+            format!("{} {}", i.rule, ids.join(","))
+        })
+        .collect()
 }
 
 /// Per net: every usable pin is placed and all of them are already one net in the breadboard view.
@@ -473,12 +549,16 @@ fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[S
                 }
             }
         }
+        // Usable pins whose part is not placed (--no-place, or no spot found): reported, and the
+        // net is not routed even when its other pins get wired.
+        let incomplete =
+            report_unplaced(acc, net, View::Breadboard, net.pins.iter().filter(|(p, q)| nl.net_of_pin(p, q).is_none()));
         let placed_pins: usize = groups.iter().map(|g| g.1).sum();
         if placed_pins < 2 {
             continue;
         }
         if groups.len() <= 1 {
-            if !net.tainted && !(matches!(opts.scope, Scope::Unrouted) && pre[ni]) {
+            if !net.tainted && !incomplete && !(matches!(opts.scope, Scope::Unrouted) && pre[ni]) {
                 acc.routed += 1;
             }
             continue;
@@ -547,7 +627,7 @@ fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[S
         }
         match failure {
             None => {
-                if !net.tainted {
+                if !net.tainted && !incomplete {
                     acc.routed += 1;
                 }
             }

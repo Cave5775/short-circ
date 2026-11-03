@@ -540,6 +540,29 @@ mod tests {
     }
 
     #[test]
+    fn wires_at_the_coordinate_limit_build_and_validate_quickly() {
+        let l = crate::COORD_LIMIT;
+        let src = format!(
+            r#"{{{HEAD},"wires":[{{"id":"h","pts":[[-{l},0],[{l},0]]}},{{"id":"d","pts":[[-{l},-{l}],[{l},{l}]]}},
+            {{"id":"v","pts":[[0,-{l}],[0,{l}]]}},{{"id":"e","pts":[[{l},{l}],[{l},-{l}],[-{l},-{l}]]}}]}}"#
+        );
+        let t = std::time::Instant::now();
+        let c = parse_circuit(&src).unwrap();
+        let lib = Library::load(&c, None);
+        for view in [View::Schematic, View::Breadboard] {
+            let n = Netlist::build(&c, &lib, view);
+            if view == View::Schematic {
+                // h and v end on the sides of e (T-junctions) and d shares e's end points.
+                let net = n.net_of_wire("e");
+                assert!(net.is_some() && ["h", "v", "d"].iter().all(|w| n.net_of_wire(w) == net));
+            }
+        }
+        let report = crate::validate(&c, &lib);
+        assert!(report.issues.iter().any(|i| i.rule == "wire-crossing"), "{:?}", report.issues);
+        assert!(t.elapsed().as_secs() < 20, "took {:?}", t.elapsed());
+    }
+
+    #[test]
     fn led_example_is_one_loop() {
         let c = parse_circuit(include_str!("../../../examples/led.circ")).unwrap();
         let n = Netlist::build(&c, &Library::load(&c, None), View::Schematic);

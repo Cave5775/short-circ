@@ -12,7 +12,8 @@
 //! top-level `at`, a definition with a top-level `size`), else as v2.
 
 use crate::model::{
-    Circuit, Dir, Label, Part, PartDef, PinDef, PinPos, Placement, Pt, Shape, Theme, ViewDef, Wire, FORMAT, FORMAT_V1,
+    Circuit, Dir, Label, Part, PartDef, PinDef, PinPos, Placement, Pt, Shape, Theme, ViewDef, Wire, COORD_LIMIT, FORMAT,
+    FORMAT_V1,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -97,7 +98,52 @@ pub fn parse_circuit(src: &str) -> Result<Circuit, ParseError> {
         .into_iter()
         .map(|d| part_from_value(d, Some(generation)))
         .collect::<Result<_, _>>()?;
+    check_circuit_coords(&circuit)?;
     Ok(circuit)
+}
+
+fn check_pt(what: impl FnOnce() -> String, p: Pt) -> Result<(), ParseError> {
+    if p.iter().all(|c| c.unsigned_abs() <= COORD_LIMIT as u32) {
+        return Ok(());
+    }
+    Err(ParseError(format!("coordinate out of range: {} at ({},{}); every coordinate must be within +-{COORD_LIMIT}", what(), p[0], p[1])))
+}
+
+/// Rejects placements, wire points and label positions beyond [`COORD_LIMIT`].
+fn check_circuit_coords(c: &Circuit) -> Result<(), ParseError> {
+    for p in &c.parts {
+        for (view, pl) in [("schematic", &p.schematic), ("breadboard", &p.breadboard)] {
+            if let Some(pl) = pl {
+                check_pt(|| format!("part {} {view} placement", p.id), pl.at)?;
+            }
+        }
+    }
+    for w in &c.wires {
+        for (i, pt) in w.pts.iter().enumerate() {
+            check_pt(|| format!("wire {} point {i}", w.id), *pt)?;
+        }
+    }
+    for l in &c.labels {
+        check_pt(|| format!("label {}", l.name), l.at)?;
+    }
+    Ok(())
+}
+
+/// Rejects pin positions and sizes beyond [`COORD_LIMIT`].
+fn check_part_coords(d: &PartDef) -> Result<(), ParseError> {
+    for (view, vd) in [("schematic", &d.schematic), ("breadboard", &d.breadboard)] {
+        let Some(vd) = vd else { continue };
+        if !vd.size.iter().all(|s| s.is_finite() && s.abs() <= COORD_LIMIT as f64) {
+            return Err(ParseError(format!(
+                "coordinate out of range: part {} {view} size {}x{}; every coordinate must be within +-{COORD_LIMIT}",
+                d.ty, vd.size[0], vd.size[1]
+            )));
+        }
+        for (id, pin) in &vd.pins {
+            check_pt(|| format!("part {} {view} pin {id}", d.ty), pin.at)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn parse_part(src: &str) -> Result<PartDef, ParseError> {
@@ -121,6 +167,7 @@ fn part_from_value(v: Value, default: Option<Gen>) -> Result<PartDef, ParseError
         Gen::V1 => serde_json::from_value::<V1PartDef>(v).map_err(err)?.upgrade(),
     };
     def.format = FORMAT.to_string();
+    check_part_coords(&def)?;
     Ok(def)
 }
 
@@ -348,6 +395,34 @@ mod tests {
         // A v1 circuit's lib entries without their own format are v1.
         let c = parse_circuit(r#"{"format":"short-circ/1","lib":[{"type":"x","size":[3,1]}]}"#).unwrap();
         assert_eq!(c.lib[0].schematic.as_ref().unwrap().size, [3.0, 1.0]);
+    }
+
+    #[test]
+    fn coordinates_beyond_the_limit_are_rejected() {
+        let wire = |a: i32, b: i32| format!(r#"{{"format":"short-circ/2","wires":[{{"id":"w","pts":[[{a},0],[{b},0]]}}]}}"#);
+        // Regression: the segment index enumerated ~5e8 cells for this wire (and v1 files too).
+        let e = parse_circuit(&wire(-2_000_000_000, 2_000_000_000)).unwrap_err();
+        assert!(e.0.contains("coordinate out of range") && e.0.contains("wire w"), "{e}");
+        assert!(parse_circuit(&wire(-1_000_000, 1_000_000)).is_ok(), "the limit itself is allowed");
+        assert!(parse_circuit(&wire(0, 1_000_001)).unwrap_err().0.contains("coordinate out of range"));
+        assert!(parse_circuit(&wire(i32::MIN, 0)).unwrap_err().0.contains("coordinate out of range"));
+        let v1 = r#"{"format":"short-circ/1","wires":[{"id":"w","pts":[[0,0],[0,1000001]]}]}"#;
+        assert!(parse_circuit(v1).unwrap_err().0.contains("coordinate out of range"));
+        let v1_part = r#"{"format":"short-circ/1","parts":[{"id":"R1","type":"r","at":[2000000000,0]}]}"#;
+        assert!(parse_circuit(v1_part).unwrap_err().0.contains("part R1"));
+        let part = r#"{"format":"short-circ/2","parts":[{"id":"R1","type":"r","breadboard":{"at":[0,-1000001]}}]}"#;
+        assert!(parse_circuit(part).unwrap_err().0.contains("breadboard placement"));
+        let label = r#"{"format":"short-circ/2","labels":[{"at":[1000001,0],"name":"N"}]}"#;
+        assert!(parse_circuit(label).unwrap_err().0.contains("label N"));
+        // Part files: pin positions and sizes, also inline in a circuit.
+        let pin = r#"{"format":"short-circ/2","type":"t","pins":[{"id":"a"}],"schematic":{"size":[1,1],"pins":{"a":{"at":[2000000000,0]}}}}"#;
+        assert!(parse_part(pin).unwrap_err().0.contains("pin a"));
+        let size = r#"{"format":"short-circ/2","type":"t","pins":[],"breadboard":{"size":[1e300,1]}}"#;
+        assert!(parse_part(size).unwrap_err().0.contains("size"));
+        let lib = format!(r#"{{"format":"short-circ/2","lib":[{pin}]}}"#);
+        assert!(parse_circuit(&lib).unwrap_err().0.contains("coordinate out of range"));
+        let ok = r#"{"format":"short-circ/2","type":"t","pins":[{"id":"a"}],"schematic":{"size":[4,2],"pins":{"a":{"at":[-1000000,1000000]}}}}"#;
+        assert!(parse_part(ok).is_ok());
     }
 
     #[test]

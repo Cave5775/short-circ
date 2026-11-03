@@ -496,7 +496,7 @@ pub fn upgrade(input: &Path, output: Option<&Path>) -> i32 {
         }
     };
     let dest = output.unwrap_or(input);
-    match std::fs::write(dest, text) {
+    match write::write_atomic(dest, &text) {
         Ok(()) => {
             println!("upgraded {} -> {}", input.display(), dest.display());
             0
@@ -947,6 +947,18 @@ mod tests {
         assert_eq!(upgrade(&bad, None), 2);
         assert_eq!(std::fs::read_to_string(&bad).unwrap(), "{ not json", "a failed upgrade leaves the file alone");
         assert_eq!(upgrade(&v1, Some(&dir.join("no/such/dir/x.part"))), 2);
+        // A rename that fails (the target is a directory) keeps exit 2, the input and the directory,
+        // and leaves no temporary file behind.
+        let blocked = dir.join("blocked.part");
+        std::fs::create_dir(&blocked).unwrap();
+        let before = std::fs::read_to_string(&v1).unwrap();
+        assert_eq!(upgrade(&v1, Some(&blocked)), 2);
+        assert!(blocked.is_dir());
+        assert_eq!(std::fs::read_to_string(&v1).unwrap(), before);
+        let mut names: Vec<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        assert_eq!(names, ["a.txt", "bad.circ", "blocked.part", "resistor.part"], "no temp file left");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

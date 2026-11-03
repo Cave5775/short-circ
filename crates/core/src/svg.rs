@@ -493,8 +493,10 @@ struct Embedded {
 }
 
 impl Embedded {
-    /// `None` when the document is not well-formed SVG or contains script or foreign content
-    /// (the artwork is then skipped; the part's `shapes` are still drawn).
+    /// `None` when the document is not well-formed SVG or contains anything `sanitize_svg` would
+    /// remove: script or foreign content, event handlers, `javascript:` URLs (also split by
+    /// whitespace), external references, `@import` (the artwork is then skipped; the part's
+    /// `shapes` are still drawn).
     fn parse(src: &str, size: [f64; 2]) -> Option<Embedded> {
         let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
         let doc = roxmltree::Document::parse_with_options(src, opts).ok()?;
@@ -502,18 +504,11 @@ impl Embedded {
         if !root.tag_name().name().eq_ignore_ascii_case("svg") {
             return None;
         }
-        for n in doc.descendants().filter(|n| n.is_element()) {
-            let tag = n.tag_name().name().to_ascii_lowercase();
-            if tag == "script" || tag == "foreignobject" {
-                return None;
-            }
-            for a in n.attributes() {
-                let name = a.name().to_ascii_lowercase();
-                let value = a.value().trim_start().to_ascii_lowercase();
-                if name.starts_with("on") || value.starts_with("javascript:") {
-                    return None;
-                }
-            }
+        // Untrusted artwork (inline `lib`, hand-written `.part` files) must pass the same checks as an
+        // import: anything the import sanitiser would remove makes the artwork not embeddable.
+        match crate::svgimport::sanitize_svg(src) {
+            Ok((_, notes)) if notes.is_empty() => {}
+            _ => return None,
         }
         let number = |name: &str| -> Option<f64> {
             let v = root.attribute(name)?;
@@ -1192,6 +1187,38 @@ mod tests {
         assert!(doc.contains("<rect"));
         assert!(artwork_document("<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>", [1.0, 1.0]).is_none());
         assert!(artwork_document("not xml", [1.0, 1.0]).is_none());
+    }
+
+    #[test]
+    fn artwork_that_the_import_sanitiser_would_change_is_not_embedded() {
+        // Each of these slipped through the old render-time scan; `sanitize_svg` modifies them all.
+        let ns = "xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"";
+        let bad = [
+            format!("<svg {ns}><a href=\" java&#9;script:alert(1)\"><rect width=\"1\" height=\"1\"/></a></svg>"),
+            format!("<svg {ns}><a xlink:href=\"java&#10;script:alert(1)\"><rect/></a></svg>"),
+            format!("<svg {ns}><image href=\"http://example.com/x.png\" width=\"1\" height=\"1\"/></svg>"),
+            format!("<svg {ns}><image xlink:href=\"C:/secret.png\" width=\"1\" height=\"1\"/></svg>"),
+            format!("<svg {ns}><rect width=\"1\" height=\"1\" fill=\"url(http://example.com/p)\"/></svg>"),
+            format!("<svg {ns}><rect width=\"1\" height=\"1\" style=\"fill:url('https://e/p')\"/></svg>"),
+            format!("<svg {ns}><style>@import url(x.css);</style><rect/></svg>"),
+            format!("<svg {ns} ONLOAD=\"x()\"><rect/></svg>"),
+            format!("<svg {ns}><rect 日x=\"1\" onclick=\"x()\"/></svg>"),
+        ];
+        for b in &bad {
+            assert!(artwork_document(b, [1.0, 1.0]).is_none(), "embedded: {b}");
+        }
+        // Local references and embedded images are fine.
+        let ok = format!(
+            "<svg {ns} viewBox=\"0 0 4 4\"><defs><linearGradient id=\"g\"/></defs><rect width=\"1\" height=\"1\" fill=\"url(#g)\" 日x=\"1\"/><use xlink:href=\"#g\"/><image href=\"data:image/png;base64,AAAA\"/></svg>"
+        );
+        assert!(artwork_document(&ok, [1.0, 1.0]).is_some());
+        // And through a circuit: the artwork is skipped, the part's shapes stay.
+        let circ = r#"{"format":"short-circ/2","lib":[{"type":"x","pins":[{"id":"a"}],"breadboard":{"size":[2,1],
+            "pins":{"a":{"at":[0,0]}},"svg":"<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"http://e/x.png\"/></svg>",
+            "shapes":[{"k":"circle","at":[1,0],"r":0.4}]}}],"parts":[{"id":"X1","type":"x","breadboard":{"at":[0,0]}}]}"#;
+        let svg = render_bb(circ);
+        assert!(!svg.contains("class=\"art\"") && !svg.contains("http://e/x.png"));
+        assert!(svg.contains("<circle cx=\"1\" cy=\"0\" r=\"0.4\""));
     }
 
     #[test]

@@ -1339,7 +1339,8 @@ fn save_and_reload_round_trip_is_byte_identical() {
     assert!(!r.h.dirty());
     let first = std::fs::read_to_string(&path).unwrap();
     assert!(first.ends_with('\n') && first.contains("\"format\": \"short-circ/2\""), "{first}");
-    assert!(!dir.join("t.circ.tmp").exists(), "temp file renamed away");
+    let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n != "t.circ").collect();
+    assert!(leftovers.is_empty(), "temp file renamed away: {leftovers:?}");
     // Load through parse + migrate, run history/load rules, save again: identical bytes.
     let mut loaded = crate::core_api::load_circuit(&path).unwrap();
     let mut h = History::new();

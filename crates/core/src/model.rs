@@ -11,6 +11,11 @@ pub const FORMAT_V1: &str = "short-circ/1";
 /// Integer grid point. 1 unit = 0.1 inch. +y is down. Same grid in every view.
 pub type Pt = [i32; 2];
 
+/// Largest absolute grid coordinate a file may use (docs/FORMAT.md "Coordinates and units"). It
+/// keeps every product and sum in the connectivity and routing code far from `i32`/`i64`
+/// overflow, and the segment index at a bounded number of cells. Enforced on read by `migrate`.
+pub const COORD_LIMIT: i32 = 1_000_000;
+
 fn default_format() -> String {
     FORMAT.to_string()
 }

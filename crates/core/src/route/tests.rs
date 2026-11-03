@@ -74,6 +74,15 @@ fn checked(c: &Circuit, o: &RouteOptions) -> RouteOutcome {
         if placed.len() < 2 {
             continue;
         }
+        // A net with a usable pin that is not placed in the target view is never routed.
+        if placed.len() < ids.len() {
+            for ((p, q), id) in n.pins.iter().zip(&ids) {
+                let named = out.failures.iter().any(|f| f.net == n.display() && f.reason.contains(&format!("{p}.{q} is not placed")));
+                let by_part = out.failures.iter().any(|f| f.net == *p);
+                assert!(id.is_some() || named || by_part, "unplaced {p}.{q} is not reported: {:?}", out.failures);
+            }
+            continue;
+        }
         let ok = placed.windows(2).all(|w| w[0] == w[1]);
         if failed.contains(&n.display().as_str()) {
             continue;
@@ -107,6 +116,10 @@ fn led_declared() -> Circuit {
         "nets":[{"name":"VCC","pins":["B1.pos","R1.a"]},{"pins":["R1.b","D1.anode"]},{"name":"GND","pins":["D1.cathode","B1.neg"]}]}"#,
     )
     .unwrap()
+}
+
+fn part_mut<'a>(c: &'a mut Circuit, id: &str) -> &'a mut crate::model::Part {
+    c.parts.iter_mut().find(|p| p.id == id).unwrap()
 }
 
 fn led_example() -> Circuit {
@@ -261,6 +274,50 @@ fn power_symbols_are_placed_beside_their_part() {
     let g = out.circuit.part("G1").unwrap().schematic.as_ref().unwrap().at;
     let r = out.circuit.part("R2").unwrap().schematic.as_ref().unwrap().at;
     assert!((g[0] - r[0]).abs() + (g[1] - r[1]).abs() < 25, "{g:?} vs {r:?}");
+}
+
+/// Every pin of every part placed in the schematic must be clear of foreign wires and labels:
+/// not on a segment, not on a label point.
+fn assert_pins_clear_of(c: &Circuit, wires: &[&str], labels: &[crate::model::Pt]) {
+    let lib = Library::load(c, None);
+    let nl = Netlist::build(c, &lib, View::Schematic);
+    for p in &nl.geom.pins {
+        for w in c.wires.iter().filter(|w| wires.contains(&w.id.as_str())) {
+            for s in w.pts.windows(2) {
+                assert!(!crate::netlist::on_segment(s[0], s[1], p.at), "{}.{} at {:?} lies on wire {}", p.part, p.pin, p.at, w.id);
+            }
+        }
+        assert!(!labels.contains(&p.at), "{}.{} at {:?} lies on a label", p.part, p.pin, p.at);
+    }
+}
+
+#[test]
+fn placed_parts_keep_clear_of_existing_wires_and_labels() {
+    // Regression: only part rectangles were obstacles, so R2 (first free spot: (10,20), pins at
+    // (10,21) and (18,21)) landed on a wire below the lowest part and on a label.
+    let c = parse_circuit(
+        r#"{"format":"short-circ/2","parts":[
+          {"id":"R1","type":"resistor","schematic":{"at":[10,10]}},
+          {"id":"R2","type":"resistor"},{"id":"G1","type":"ground"}],
+        "wires":[{"id":"w1","pts":[[4,21],[24,21]]},{"id":"w2","pts":[[4,23],[4,30]]}],
+        "labels":[{"at":[4,26],"name":"SIG"},{"at":[24,21],"name":"EDGE"}],
+        "nets":[{"pins":["R1.b","R2.a"]},{"pins":["R2.b","G1.gnd"]}]}"#,
+    )
+    .unwrap();
+    let out = checked(&c, &declared(View::Schematic));
+    assert_pins_clear_of(&out.circuit, &["w1", "w2"], &[[4, 26], [24, 21]]);
+    let r2 = out.circuit.part("R2").unwrap().schematic.as_ref().unwrap().at;
+    assert_ne!(r2, [10, 20], "the spot on the wire is not used");
+    // The existing wires and labels are untouched.
+    assert_eq!(out.circuit.wires[0].pts, c.wires[0].pts);
+    assert!(out.circuit.labels.iter().filter(|l| l.name == "SIG" || l.name == "EDGE").count() == 2);
+    // A wire running through the places next to a pin keeps single-pin parts clear as well.
+    let g = out.circuit.part("G1").unwrap().schematic.as_ref().unwrap().at;
+    assert!(!on_any_segment(&out.circuit, g), "{g:?}");
+}
+
+fn on_any_segment(c: &Circuit, p: crate::model::Pt) -> bool {
+    c.wires_in(View::Schematic).filter(|w| w.id == "w1" || w.id == "w2").any(|w| w.pts.windows(2).any(|s| crate::netlist::on_segment(s[0], s[1], p)))
 }
 
 #[test]
@@ -735,6 +792,92 @@ fn no_place_routes_only_existing_pins() {
     assert!(out.placed.is_empty());
     assert!(out.wires_added.is_empty());
     assert!(out.circuit.parts.iter().all(|p| p.breadboard.is_none()));
+}
+
+#[test]
+fn unplaced_pins_are_reported_and_their_nets_are_not_counted_as_routed() {
+    // Regression: nets with two or more usable pins but fewer than two placed ones were skipped
+    // silently, and a 3-pin net with two placed pins counted as routed.
+    let placed_bb = checked(&led_example(), &opts(View::Breadboard)).circuit;
+    let mut c = placed_bb.clone();
+    part_mut(&mut c, "D1").breadboard = None;
+    let mut o = opts(View::Breadboard);
+    o.place_missing = false;
+    let out = checked(&c, &o);
+    let reasons: Vec<(&str, &str)> = out.failures.iter().map(|f| (f.net.as_str(), f.reason.as_str())).collect();
+    assert_eq!(out.failures.len(), 2, "{reasons:?}");
+    assert!(out.failures.iter().any(|f| f.reason == "D1.anode is not placed in the breadboard view"), "{reasons:?}");
+    assert!(out.failures.iter().any(|f| f.reason == "D1.cathode is not placed in the breadboard view"), "{reasons:?}");
+    assert_eq!(out.routed, 1, "only the B1-R1 net is complete");
+
+    // The same in the schematic.
+    let mut c = led_declared();
+    part_mut(&mut c, "B1").schematic = Some(crate::model::Placement::at(10, 10));
+    part_mut(&mut c, "R1").schematic = Some(crate::model::Placement::at(30, 10));
+    let mut o = declared(View::Schematic);
+    o.place_missing = false;
+    let out = checked(&c, &o);
+    assert_eq!(out.failures.len(), 2, "{:?}", out.failures);
+    assert!(out.failures.iter().all(|f| f.reason.starts_with("D1.") && f.reason.ends_with(" is not placed in the schematic view")), "{:?}", out.failures);
+    assert_eq!(out.routed, 1);
+
+    // A 3-pin net whose third part cannot be placed (reported once, by part): not routed.
+    let c = parse_circuit(
+        r#"{"format":"short-circ/2","parts":[
+          {"id":"MY","type":"breadboard_mini","breadboard":{"at":[0,0]}},
+          {"id":"U1","type":"dip40"},{"id":"R1","type":"resistor"},{"id":"R2","type":"resistor"}],
+        "nets":[{"name":"N","pins":["R1.b","R2.a","U1.1"]}]}"#,
+    )
+    .unwrap();
+    let out = checked(&c, &declared(View::Breadboard));
+    assert_eq!(out.failures.len(), 1, "{:?}", out.failures);
+    assert!(out.failures[0].net == "U1" && out.failures[0].reason.contains("no free spot"));
+    assert_eq!(out.routed, 0, "two of three pins placed is not a routed net");
+}
+
+/// R1 and R2 stand loose in the breadboard view (no board yet) with their legs exactly where the
+/// holes of a half board at the origin would be: a strip would join R1.a and R2.a, which belong
+/// to different nets. R3 is missing, so the run has to add a board.
+fn loose_legs_circuit(lib: &Library) -> Circuit {
+    let hole = |name: &str| lib.get("breadboard_half").unwrap().breadboard.as_ref().unwrap().pins[name].at;
+    let (a3, c3) = (hole("a3"), hole("c3"));
+    let mut c = parse_circuit(
+        r#"{"format":"short-circ/2","parts":[
+          {"id":"R1","type":"resistor"},{"id":"R2","type":"resistor"},{"id":"R3","type":"resistor"}],
+        "nets":[{"name":"N1","pins":["R1.a","R3.a"]},{"name":"N2","pins":["R2.a","R3.b"]}]}"#,
+    )
+    .unwrap();
+    // The resistor's pin a is at local (0,1).
+    part_mut(&mut c, "R1").breadboard = Some(crate::model::Placement::at(a3[0], a3[1] - 1));
+    part_mut(&mut c, "R2").breadboard = Some(crate::model::Placement::at(c3[0], c3[1] - 1));
+    // Placed in both views, so the cross-view check compares their nets.
+    part_mut(&mut c, "R1").schematic = Some(crate::model::Placement::at(10, 10));
+    part_mut(&mut c, "R2").schematic = Some(crate::model::Placement::at(10, 30));
+    c
+}
+
+#[test]
+fn a_new_board_keeps_clear_of_loose_legs() {
+    // Regression: the board was always added at (0,0), so legs that already stood on its holes
+    // were joined by the strips (net-merged errors in the output).
+    let lib = Library::builtin();
+    let c = loose_legs_circuit(&lib);
+    let before = validate(&c, &lib);
+    assert!(!before.issues.iter().any(|i| i.rule == "net-merged"), "{:?}", before.issues);
+    let out = checked(&c, &declared(View::Breadboard));
+    let board = out.circuit.parts.iter().find(|p| p.ty == "breadboard_half").expect("a board was added");
+    let at = board.breadboard.as_ref().unwrap().at;
+    assert_ne!(at, [0, 0], "the first position would short the loose legs");
+    assert!(out.failures.is_empty(), "{:?}", out.failures);
+    assert_eq!(out.routed, 2);
+    let report = validate(&out.circuit, &Library::load(&out.circuit, None));
+    assert!(!report.issues.iter().any(|i| i.rule == "net-merged"), "{:?}", report.issues);
+    // The legs stay where they were.
+    assert_eq!(out.circuit.part("R1").unwrap().breadboard, c.part("R1").unwrap().breadboard);
+    // Without loose legs the board still goes to the origin.
+    let out = checked(&led_declared(), &declared(View::Breadboard));
+    let board = out.circuit.parts.iter().find(|p| p.ty == "breadboard_half").unwrap();
+    assert_eq!(board.breadboard.as_ref().unwrap().at, [0, 0]);
 }
 
 #[test]

@@ -873,7 +873,7 @@ fn sanitize_node(node: roxmltree::Node, src: &str, cuts: &mut Cuts) {
             let n = a.name();
             let v = a.value();
             // Some(true): event handler, Some(false): script or external reference.
-            let kind = if n.len() > 2 && n[..2].eq_ignore_ascii_case("on") {
+            let kind = if n.len() > 2 && n.get(..2).is_some_and(|p| p.eq_ignore_ascii_case("on")) {
                 Some(true)
             } else if is_href(n) {
                 let t = v.trim().to_ascii_lowercase();
@@ -1771,6 +1771,19 @@ mod tests {
 </svg>";
         assert_eq!(sanitize_svg(clean).unwrap(), (clean.to_string(), vec![]));
         assert!(sanitize_svg("<html/>").is_err());
+    }
+
+    #[test]
+    fn sanitize_survives_non_ascii_attribute_names() {
+        // Regression: the `on*` check sliced the attribute name at byte 2, inside a multi-byte char.
+        for name in ["日x", "é", "日本語", "ön", "x日"] {
+            let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" {name}=\"1\"/>");
+            let (out, notes) = sanitize_svg(&svg).unwrap();
+            assert_eq!(out, svg);
+            assert!(notes.is_empty());
+        }
+        let (out, _) = sanitize_svg("<svg xmlns=\"http://www.w3.org/2000/svg\" 日x=\"1\" onclick=\"x()\"/>").unwrap();
+        assert!(out.contains("日x") && !out.contains("onclick"), "{out}");
     }
 
     #[test]

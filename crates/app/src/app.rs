@@ -505,6 +505,9 @@ impl ShortCircApp {
         if dir_changed {
             l.lib = Library::load(&l.circuit, path.parent());
             l.analyse();
+            // The texture cache is keyed by part type only, and a different folder can define the
+            // same type with other artwork: same as every other library reload.
+            self.tex.clear();
         }
         self.recent.add(&path);
         self.disk_changed = false;
