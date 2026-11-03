@@ -41,6 +41,21 @@ fn placed_rects(c: &Circuit, lib: &dyn PartLookup) -> Vec<Rect> {
     v
 }
 
+/// Existing schematic wire segments and label points as thin rectangles grown by one unit: a
+/// newly placed body must keep clear of them (a pin landing on a wire or label would connect to it).
+fn fixed_obstacles(c: &Circuit) -> Vec<Rect> {
+    let mut v = Vec::new();
+    for w in c.wires_in(View::Schematic) {
+        for s in w.pts.windows(2) {
+            v.push(Rect { x0: s[0][0].min(s[1][0]), y0: s[0][1].min(s[1][1]), x1: s[0][0].max(s[1][0]), y1: s[0][1].max(s[1][1]) }.inflate(1));
+        }
+    }
+    for l in &c.labels {
+        v.push(Rect { x0: l.at[0], y0: l.at[1], x1: l.at[0], y1: l.at[1] }.inflate(1));
+    }
+    v
+}
+
 /// Size of a part's schematic body in whole grid units (rounded up).
 fn body_size(lib: &dyn PartLookup, ty: &str) -> (i32, i32) {
     let vd = lib.get(ty).and_then(|d| d.schematic.as_ref());
@@ -66,6 +81,7 @@ fn place_missing(c: &mut Circuit, lib: &dyn PartLookup, nets: &[SrcNet], opts: &
     let tracks = (2 + nets.len() as i32 / 6).min(8);
     let margin = opts.clearance.clamp(0, super::MAX_CLEARANCE).saturating_mul(2).saturating_add(2 + tracks).max(4);
     let mut rects = placed_rects(c, lib);
+    let fixed = fixed_obstacles(c);
     let idx = part_index(c);
 
     // Connectivity between parts (shared nets), and the nets of each part.
@@ -157,6 +173,10 @@ fn place_missing(c: &mut Circuit, lib: &dyn PartLookup, nets: &[SrcNet], opts: &
                 cx = o.x1 + margin;
                 continue;
             }
+            if let Some(o) = fixed.iter().find(|o| r.overlaps(o)) {
+                cx = o.x1;
+                continue;
+            }
             break;
         }
         let vd = lib.get(&c.parts[i].ty).and_then(|d| d.schematic.as_ref()).expect("schematic view");
@@ -208,7 +228,7 @@ fn place_missing(c: &mut Circuit, lib: &dyn PartLookup, nets: &[SrcNet], opts: &
                 let ox = tp[0] + dx;
                 let oy = tp[1] + dy;
                 let r = Rect { x0: ox + r0.x0, y0: oy + r0.y0, x1: ox + r0.x0 + w, y1: oy + r0.y0 + h };
-                if rects.iter().any(|o| r.overlaps(&o.inflate(margin))) {
+                if rects.iter().any(|o| r.overlaps(&o.inflate(margin))) || fixed.iter().any(|o| r.overlaps(o)) {
                     continue;
                 }
                 let pw = [ox + local_pin[0], oy + local_pin[1]];
@@ -415,9 +435,15 @@ fn route(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[Src
 
     // Which nets need work.
     let mut works: Vec<Work> = Vec::new();
+    // Nets with a usable pin that is not placed: never counted as routed.
+    let mut incomplete = vec![false; nets.len()];
     for (ni, n) in nets.iter().enumerate() {
         let pins: Vec<usize> =
             n.pins.iter().filter_map(|(p, q)| pin_idx.get(&(p.as_str(), q.as_str())).copied()).collect();
+        // Usable pins whose part is not placed (--no-place): reported, and the net is not routed
+        // even when its other pins get wired.
+        let unplaced = n.pins.iter().filter(|(p, q)| !pin_idx.contains_key(&(p.as_str(), q.as_str())));
+        incomplete[ni] = super::report_unplaced(acc, n, View::Schematic, unplaced);
         if pins.len() < 2 {
             continue;
         }
@@ -434,7 +460,7 @@ fn route(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[Src
             }
         }
         if groups.len() == 1 {
-            if !matches!(opts.scope, Scope::Unrouted) && !n.tainted {
+            if !matches!(opts.scope, Scope::Unrouted) && !n.tainted && !incomplete[ni] {
                 acc.routed += 1;
             }
             continue;
@@ -659,7 +685,7 @@ fn route(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[Src
         }
         let net = &nets[wk.net];
         if res.stuck.is_empty() {
-            if !net.tainted {
+            if !net.tainted && !incomplete[wk.net] {
                 acc.routed += 1;
             }
             continue;
@@ -726,7 +752,7 @@ fn route(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[Src
                 new_labels.push(Label { at, name: name.clone(), color: None });
             }
         }
-        if !net.tainted {
+        if !net.tainted && !incomplete[wk.net] {
             acc.routed += 1;
         }
     }

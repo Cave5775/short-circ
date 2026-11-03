@@ -186,6 +186,26 @@ pub fn port(circuit: &Circuit, lib: &dyn PartLookup, opts: &RouteOptions) -> Rou
 
 // ---- shared helpers ----------------------------------------------------------------------
 
+/// Report the usable pins of `net` that have no placement in `view` (a net with such a pin is
+/// never counted as routed). A part for which a failure was already reported (named by its id,
+/// e.g. "no free spot on the board") is not reported again. Returns whether any pin was unplaced.
+pub(crate) fn report_unplaced<'a>(
+    acc: &mut Acc,
+    net: &nets::SrcNet,
+    view: View,
+    unplaced: impl IntoIterator<Item = &'a (String, String)>,
+) -> bool {
+    let mut any = false;
+    for (part, pin) in unplaced {
+        any = true;
+        if acc.failures.iter().any(|f| f.net == *part) {
+            continue;
+        }
+        acc.failures.push(RouteFailure { net: net.display(), reason: format!("{part}.{pin} is not placed in the {} view", view.key()) });
+    }
+    any
+}
+
 /// Integer rectangle on the lattice (closed on all sides for point tests).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Rect {

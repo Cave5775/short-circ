@@ -348,6 +348,26 @@ mod tests {
     }
 
     #[test]
+    fn no_place_reports_every_unplaced_pin_and_exits_1() {
+        // Regression: with --no-place the nets of a schematic-only file were skipped silently
+        // (exit 0 although nothing was realised).
+        let dir = temp_dir("noplace");
+        let inp = dir.join("led.circ");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v1/led.circ"), &inp).unwrap();
+        let out = dir.join("out.circ");
+        let a = vec![inp.display().to_string(), out.display().to_string(), "--no-place".into()];
+        let (code, stdout, stderr) = run_capture(&a);
+        assert_eq!(code, 1, "{stdout} {stderr}");
+        let failed: Vec<&str> = stdout.lines().filter(|l| l.starts_with("failed ")).collect();
+        assert!(failed.len() >= 4, "{stdout}");
+        assert!(failed.iter().all(|l| l.contains(" is not placed in the breadboard view")), "{stdout}");
+        assert!(stdout.contains("failed GND: D1.cathode is not placed") || stdout.contains("D1.cathode is not placed"), "{stdout}");
+        assert!(stdout.trim_end().ends_with(&format!("routed 0 net(s), {} failed", failed.len())), "{stdout}");
+        assert!(out.exists(), "OUT is still written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn run_writes_the_output_atomically() {
         let dir = temp_dir("atomic");
         let inp = dir.join("led.circ");
