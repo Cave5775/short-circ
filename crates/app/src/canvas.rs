@@ -7,7 +7,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Painter, Pos2, Rect, Shape, St
 use short_circ_core::color::{self, Palette, Rgba, Spec};
 use short_circ_core::transform::{pin_world, to_world, world_bbox};
 use short_circ_core::{
-    Anchor, Circuit, Library, Part, PartDef, Placement, Pt, Shape as Sh, Style, View as ModelView, Wire,
+    Anchor, Circuit, Library, Part, PartDef, PartLookup, Placement, Pt, Shape as Sh, Style, View as ModelView, Wire,
 };
 
 /// Grid units per world unit are 1:1; this is pixels per grid unit.
@@ -267,7 +267,7 @@ pub struct PinHit {
 
 /// The pin of a part placed in `view` closest to `w` within `tol`. At equal distance a pin of a
 /// real part beats a board hole (a leg sitting in a hole).
-pub fn pin_at(circuit: &Circuit, lib: &Library, view: ModelView, w: [f64; 2], tol: f64) -> Option<PinHit> {
+pub fn pin_at(circuit: &Circuit, lib: &dyn PartLookup, view: ModelView, w: [f64; 2], tol: f64) -> Option<PinHit> {
     let mut best: Option<((f64, bool), PinHit)> = None;
     for (i, part) in circuit.parts.iter().enumerate() {
         let (Some(pl), Some(def)) = (part.placement(view), lib.get(&part.ty)) else { continue };
@@ -309,7 +309,7 @@ pub fn wire_at(circuit: &Circuit, view: ModelView, w: [f64; 2], tol: f64) -> Opt
 }
 
 /// Index of the smallest part placed in `view` whose box (grown by `tol`) contains `w`.
-pub fn part_at(circuit: &Circuit, lib: &Library, view: ModelView, w: [f64; 2], tol: f64) -> Option<usize> {
+pub fn part_at(circuit: &Circuit, lib: &dyn PartLookup, view: ModelView, w: [f64; 2], tol: f64) -> Option<usize> {
     let mut best: Option<(f64, usize)> = None;
     for (i, part) in circuit.parts.iter().enumerate() {
         let Some(pl) = part.placement(view) else { continue };
