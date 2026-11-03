@@ -181,6 +181,34 @@ fn text_commit(ui: &mut egui::Ui, salt: &str, current: &str, width: f32) -> Opti
     None
 }
 
+/// The colour field of the properties panel, also used by the Autoroute dialog: a swatch, a hex /
+/// name box and a preset combo, in the current layout. Returns the new text when the user typed
+/// one (on Enter or focus loss) or picked a preset; `extras` adds the `default` and `none`
+/// choices that only make sense for part colours.
+pub(crate) fn color_edit(ui: &mut egui::Ui, key: &str, current: Option<&str>, extras: bool) -> Option<String> {
+    let mut out = None;
+    swatch(ui, current);
+    if let Some(text) = text_commit(ui, &format!("{key}:text"), current.unwrap_or(""), 84.0) {
+        out = Some(text);
+    }
+    egui::ComboBox::from_id_salt(format!("{key}:combo")).selected_text("presets").width(64.0).show_ui(ui, |ui| {
+        for (n, _) in short_circ_core::color::preset_names() {
+            if ui.selectable_label(current.is_some_and(|c| c.eq_ignore_ascii_case(n)), *n).clicked() {
+                out = Some(n.to_string());
+            }
+        }
+        if extras {
+            if ui.selectable_label(false, "default").clicked() {
+                out = Some("default".into());
+            }
+            if ui.selectable_label(current.is_some_and(|c| c.eq_ignore_ascii_case("none")), "none").clicked() {
+                out = Some("none".into());
+            }
+        }
+    });
+    out
+}
+
 fn item_key(sel: &Selection) -> String {
     match sel.single() {
         Some(Item::Part(i)) => format!("p:{i}"),
@@ -448,23 +476,9 @@ impl EditUi {
     fn color_row(&self, ui: &mut egui::Ui, acts: &mut Vec<(String, Act)>, key: &str, name: &str, current: Option<&str>, mk: &dyn Fn(String) -> Act) {
         ui.horizontal(|ui| {
             ui.label(name);
-            swatch(ui, current);
-            if let Some(text) = text_commit(ui, &format!("{key}:text"), current.unwrap_or(""), 84.0) {
+            if let Some(text) = color_edit(ui, key, current, true) {
                 acts.push((key.to_string(), mk(text)));
             }
-            egui::ComboBox::from_id_salt(format!("{key}:combo")).selected_text("presets").width(64.0).show_ui(ui, |ui| {
-                for (n, _) in short_circ_core::color::preset_names() {
-                    if ui.selectable_label(current.is_some_and(|c| c.eq_ignore_ascii_case(n)), *n).clicked() {
-                        acts.push((key.to_string(), mk(n.to_string())));
-                    }
-                }
-                if ui.selectable_label(false, "default").clicked() {
-                    acts.push((key.to_string(), mk("default".into())));
-                }
-                if ui.selectable_label(current.is_some_and(|c| c.eq_ignore_ascii_case("none")), "none").clicked() {
-                    acts.push((key.to_string(), mk("none".into())));
-                }
-            });
         });
         self.field_error(ui, key);
     }

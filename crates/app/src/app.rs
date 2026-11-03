@@ -1,6 +1,7 @@
 //! The egui application: menus, panels, file loading and the interactive canvas, one canvas per
 //! view (Schematic | Breadboard) with its own camera, selection and locked net.
 
+use crate::autoroute_ui::{self, AutorouteUi};
 use crate::canvas::{self, Camera, DrawCtx, Highlight, Theme};
 use crate::core_api::{self, Nets};
 use crate::edit_ui::{self, EditUi};
@@ -121,6 +122,13 @@ impl Loaded {
         self.analyse();
     }
 
+    /// Commit an autoroute outcome as one undo step and recompute everything derived.
+    fn apply_autoroute(&mut self, view: View, outcome: &Circuit) -> bool {
+        let changed = autoroute_ui::commit(&mut self.circuit, &mut self.history, &self.lib, outcome, view);
+        self.after_edit();
+        changed
+    }
+
     /// Recompute everything derived from the circuit and the library.
     fn analyse(&mut self) {
         self.nets = [
@@ -162,6 +170,7 @@ enum Action {
     SaveAs,
     Quit,
     ToggleEdit,
+    OpenAutoroute,
     Edit(editor::Command),
     Place(String),
     /// Reload the file from disk, dropping unsaved edits (the "changed on disk" banner).
@@ -221,6 +230,8 @@ pub struct ShortCircApp {
     last_title: String,
     /// The last status message is a refusal (shown in red).
     status_warn: bool,
+    /// Tools > Autoroute... dialog and its preview.
+    autoroute: AutorouteUi,
 }
 
 const STATUS_SECS: f32 = 3.0;
@@ -230,6 +241,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+N", "new circuit (Edit mode)"),
     ("Ctrl+S / Ctrl+Shift+S", "save / save as"),
     ("Ctrl+E", "switch between View mode and Edit mode"),
+    ("Ctrl+Shift+R", "Tools > Autoroute... (realise one view from the other)"),
     ("1 / 2", "show the schematic / the breadboard view"),
     ("F", "fit the view to the window"),
     ("F5", "reload the file now (both modes)"),
@@ -331,6 +343,7 @@ impl ShortCircApp {
             disk_changed: false,
             last_title: String::new(),
             status_warn: false,
+            autoroute: AutorouteUi::default(),
         };
         if let Some(p) = initial {
             app.load_file(&cc.egui_ctx, &p);
@@ -354,6 +367,7 @@ impl ShortCircApp {
                 self.edit.editor.reset();
                 self.edit.last_view = self.active;
                 self.disk_changed = false;
+                self.autoroute.invalidate();
                 let _ = ctx;
             }
             Err(msg) => self.error = Some(msg),
@@ -384,6 +398,7 @@ impl ShortCircApp {
                 self.tex.clear();
                 self.error = None;
                 self.disk_changed = false;
+                self.autoroute.invalidate();
                 self.edit.editor.reset();
                 self.reloads += 1;
                 let msg = format!("Reloaded ({})", self.reloads);
@@ -446,6 +461,7 @@ impl ShortCircApp {
         self.tex.clear();
         self.error = None;
         self.disk_changed = false;
+        self.autoroute.invalidate();
         self.edit.editor.reset();
         self.edit.last_view = self.active;
         self.edit_mode = true;
@@ -518,6 +534,9 @@ impl ShortCircApp {
 
     /// Feed one event to the editor and carry out what it asks for.
     fn edit_event(&mut self, ctx: &egui::Context, ev: editor::Event, tol: editor::HitTol) {
+        if self.autoroute.holds_preview() {
+            return; // editing is blocked while the autoroute preview is shown
+        }
         let view = self.active;
         let Some(l) = &mut self.loaded else { return };
         let mut e = EditCtx::new(&mut l.circuit, &mut l.history, &l.lib, view);
@@ -710,6 +729,11 @@ impl ShortCircApp {
                     self.save_as(ctx);
                 }
                 Action::ToggleEdit => self.set_edit_mode(ctx, !self.edit_mode),
+                Action::OpenAutoroute => {
+                    if let Some(l) = &self.loaded {
+                        self.autoroute.open(&l.circuit, self.active);
+                    }
+                }
                 Action::Edit(cmd) => self.edit_event(ctx, editor::Event::Command(cmd), Default::default()),
                 Action::Place(ty) => {
                     if !self.edit_mode {
@@ -798,6 +822,67 @@ impl ShortCircApp {
         }
     }
 
+    /// Id of the one selected part (View mode: the clicked part; Edit mode: the selection).
+    fn selected_part_id(&self) -> Option<String> {
+        let l = self.loaded.as_ref()?;
+        if self.edit_mode {
+            let mut parts = self.edit.editor.selection().parts();
+            return if parts.len() == 1 { parts.pop() } else { None };
+        }
+        autoroute_ui::selected_id(&l.circuit, self.vs[vi(self.active)].selected).map(String::from)
+    }
+
+    /// The Autoroute dialog; commits the outcome when it hands one over.
+    fn autoroute_window(&mut self, ctx: &egui::Context) {
+        if !self.autoroute.open {
+            return;
+        }
+        let sel = self.selected_part_id();
+        let applied = match &self.loaded {
+            Some(l) => {
+                let name = autoroute_ui::file_label(l.path.as_ref());
+                let env = autoroute_ui::Env {
+                    circuit: &l.circuit,
+                    lib: &l.lib,
+                    dir: l.dir(),
+                    file_name: name.as_deref(),
+                    selected: sel.as_deref(),
+                };
+                self.autoroute.show(ctx, Some(&env))
+            }
+            None => self.autoroute.show(ctx, None),
+        };
+        // A fresh preview shows its target view.
+        if let Some(to) = self.autoroute.take_arrived() {
+            self.active = to;
+        }
+        if let Some(data) = applied {
+            self.apply_autoroute(ctx, *data);
+        }
+    }
+
+    /// Commit an autoroute outcome: one undo step, Edit mode on, derived data recomputed, nothing
+    /// selected, the target view shown.
+    fn apply_autoroute(&mut self, ctx: &egui::Context, data: autoroute_ui::PreviewData) {
+        let to = data.to();
+        let msg = data.summary();
+        let Some(l) = &mut self.loaded else { return };
+        let changed = l.apply_autoroute(to, &data.outcome.circuit);
+        self.autoroute.close();
+        self.active = to;
+        if changed && !self.edit_mode {
+            self.set_edit_mode(ctx, true);
+        }
+        self.edit.editor.reset();
+        self.edit.last_view = self.active;
+        for st in &mut self.vs {
+            st.selected = None;
+            st.locked = None;
+        }
+        self.vs[vi(to)].pending_fit = true;
+        self.set_status(ctx, msg);
+    }
+
     fn handle_global_input(&mut self, ctx: &egui::Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         if let Some(p) = dropped.into_iter().next() {
@@ -826,6 +911,9 @@ impl ShortCircApp {
         }
         if toggle {
             self.actions.push(Action::ToggleEdit);
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::R)) {
+            self.actions.push(Action::OpenAutoroute);
         }
         // F5 reloads in both modes.
         if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
@@ -932,6 +1020,13 @@ impl ShortCircApp {
                 ui.checkbox(&mut self.labels.values, "Part values");
                 ui.checkbox(&mut self.labels.wire_ids, "Wire ids");
                 ui.checkbox(&mut self.labels.pin_names, "Pin names");
+            });
+            ui.menu_button("Tools", |ui| {
+                let has_doc = self.loaded.is_some();
+                if ui.add_enabled(has_doc, egui::Button::new("Autoroute...  (Ctrl+Shift+R)")).clicked() {
+                    self.actions.push(Action::OpenAutoroute);
+                    ui.close();
+                }
             });
             ui.menu_button("Help", |ui| {
                 if ui.button("Shortcuts").clicked() {
@@ -1162,7 +1257,11 @@ impl ShortCircApp {
             }
             if st.pending_fit {
                 st.pending_fit = false;
-                match self.loaded.as_ref().and_then(|l| canvas::circuit_bounds(&l.circuit, &l.lib, view)) {
+                let bounds = match self.autoroute.preview_for(view) {
+                    Some(p) => canvas::circuit_bounds(&p.outcome.circuit, &p.lib, view),
+                    None => self.loaded.as_ref().and_then(|l| canvas::circuit_bounds(&l.circuit, &l.lib, view)),
+                };
+                match bounds {
                     Some((lo, hi)) => st.cam.fit(lo, hi, rect.size(), 40.0),
                     None => st.cam = Camera::default(),
                 }
@@ -1186,7 +1285,8 @@ impl ShortCircApp {
         }
         let cam = self.vs[vidx].cam;
         let edit_mode = self.edit_mode;
-        if edit_mode {
+        let previewing = self.autoroute.holds_preview();
+        if edit_mode && !previewing {
             let evs = self.edit.pointer_events(ui, rect, &resp, cam);
             let px = 1.0 / cam.scale as f64;
             let tol = match view {
@@ -1208,7 +1308,8 @@ impl ShortCircApp {
                 nets_panel::add_highlight(&mut hl, net);
             }
         }
-        if let (Some(l), Some(pos)) = (&self.loaded, resp.hover_pos()) {
+        let hover = if previewing { None } else { resp.hover_pos() };
+        if let (Some(l), Some(pos)) = (&self.loaded, hover) {
             let nets = l.nets(view);
             let w = cam.to_world(pos - rect.min);
             let px = 1.0 / cam.scale as f64;
@@ -1276,6 +1377,7 @@ impl ShortCircApp {
             canvas::draw_grid(&d, rect.size());
         }
         match &self.loaded {
+            Some(_) if self.autoroute.draw_preview(&d, &mut self.tex, view) => {}
             Some(l) if view_in_use(&l.circuit, view) => match view {
                 View::Schematic => canvas::draw_schematic(&d, &l.circuit, &l.lib, &l.junctions, &hl, selected),
                 View::Breadboard => {
@@ -1303,7 +1405,7 @@ impl ShortCircApp {
                 );
             }
         }
-        if edit_mode {
+        if edit_mode && !previewing {
             if let Some(l) = &self.loaded {
                 self.edit.draw_overlays(&d, &l.circuit, &l.lib, view);
                 self.edit.draw_ghost(&d, &mut self.tex, &l.circuit, &l.lib, view);
@@ -1445,11 +1547,14 @@ impl eframe::App for ShortCircApp {
         self.banner(ui);
         self.status_banner(ui);
         self.disk_banner(ui);
+        self.autoroute.banner(ui);
         self.hint_bar(ui);
         if self.show_issues {
             self.issues_panel(ui, &theme);
         }
-        if self.edit_mode {
+        if self.autoroute.holds_preview() {
+            // The panels describe the real circuit; editing it is blocked while previewing.
+        } else if self.edit_mode {
             self.edit_props_panel(ui);
         } else {
             self.info_panel(ui);
@@ -1470,6 +1575,7 @@ impl eframe::App for ShortCircApp {
             }
         }
         self.confirm_window(&ctx);
+        self.autoroute_window(&ctx);
         self.about_window(&ctx);
         self.help_window(&ctx);
         self.run_actions(&ctx);
@@ -1662,5 +1768,71 @@ mod tests {
         vs[vi(View::Breadboard)].cam.scale = 33.0;
         assert!(vs[vi(View::Schematic)].selected.is_none() && vs[vi(View::Schematic)].locked.is_none());
         assert_eq!(vs[vi(View::Schematic)].cam, Camera::default());
+    }
+
+    fn loaded_from(tag: &str, name: &str, src: &str) -> (Loaded, PathBuf) {
+        let dir = temp(tag);
+        let path = dir.join(name);
+        std::fs::write(&path, src).unwrap();
+        (build_loaded(&path).unwrap(), dir)
+    }
+
+    fn text(c: &Circuit) -> String {
+        short_circ_core::write::circuit_to_string(c)
+    }
+
+    #[test]
+    fn applying_an_autoroute_is_one_undo_step_that_restores_the_circuit_and_recomputes() {
+        use short_circ_core::route::RouteOptions;
+        // led.circ is wired in both views; take the jumper out so the breadboard has work to do.
+        let mut c = core_api::parse_circuit_text(include_str!("../../../examples/led.circ")).unwrap();
+        c.wires.retain(|w| w.id != "j1");
+        let (mut l, dir) = loaded_from("ar-led", "led.circ", &text(&c));
+        let before = text(&l.circuit);
+        let opts = RouteOptions::default();
+        let preview = autoroute_ui::compute_preview(&l.circuit, &l.lib, l.dir(), &opts);
+        assert_eq!(text(&l.circuit), before, "previewing does not touch the circuit");
+        assert!(!l.dirty() && !l.history.can_undo());
+        assert!(preview.changed && !preview.outcome.wires_added.is_empty());
+        let new_wire = preview.outcome.wires_added[0].clone();
+        assert!(l.nets(View::Breadboard).of_wire(&new_wire).is_none());
+
+        assert!(l.apply_autoroute(preview.to(), &preview.outcome.circuit));
+        assert_eq!(text(&l.circuit), text(&preview.outcome.circuit));
+        assert!(l.dirty(), "the title gets its * and Save is meaningful");
+        // Derived data follows: the new jumpers are in the breadboard nets, validation and the
+        // jumper colours cover them, the schematic is as before.
+        assert!(l.nets(View::Breadboard).of_wire(&new_wire).is_some());
+        assert_eq!(l.jumpers.len(), l.circuit.wires.iter().filter(|w| w.view == View::Breadboard).count());
+        assert_eq!(l.report.errors, 0, "{:?}", l.report.issues);
+
+        // One undo restores the exact previous circuit and nothing else is left to undo.
+        assert!(l.history.undo(&mut l.circuit));
+        l.after_edit();
+        assert_eq!(text(&l.circuit), before);
+        assert!(!l.history.can_undo() && !l.dirty());
+        assert!(l.nets(View::Breadboard).of_wire(&new_wire).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn applying_declared_nets_places_the_parts_and_resolves_their_types() {
+        use short_circ_core::route::{RouteOptions, Source};
+        let (mut l, dir) = loaded_from("ar-nets", "nets_only.circ", include_str!("../../../examples/nets_only.circ"));
+        let before = text(&l.circuit);
+        let opts = RouteOptions { to: View::Schematic, source: Source::Declared, ..RouteOptions::default() };
+        let preview = autoroute_ui::compute_preview(&l.circuit, &l.lib, l.dir(), &opts);
+        assert!(l.nets(View::Schematic).of_pin("R1", "a").is_none());
+        assert!(l.apply_autoroute(View::Schematic, &preview.outcome.circuit));
+        assert!(l.nets(View::Schematic).of_pin("R1", "a").is_some(), "nets of the schematic are rebuilt");
+        assert!(l.circuit.parts.iter().all(|p| p.schematic.is_some()));
+        assert!(l.history.undo(&mut l.circuit));
+        assert_eq!(text(&l.circuit), before);
+        assert!(!l.history.can_undo());
+        // An outcome that changes nothing is not an undo step.
+        let same = l.circuit.clone();
+        assert!(!l.apply_autoroute(View::Schematic, &same));
+        assert!(!l.history.can_undo() && !l.dirty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

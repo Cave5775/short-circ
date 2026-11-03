@@ -3,6 +3,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod app;
+mod autoroute_ui;
 mod breadboard;
 mod canvas;
 mod cli;

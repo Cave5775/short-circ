@@ -96,8 +96,9 @@ cargo test --workspace
 
 The app can also edit circuits in both views (move, rotate and place parts, draw wires and jumpers, undo and redo, save). Edit mode: Ctrl+E; the details are under "Using the viewer" above.
 
-<!-- TODO(integrator): confirm after merge -->
-Tools > Autoroute... opens the same autorouter as the `--autoroute` command, so you can realise one view from the other without leaving the app.
+Tools > Autoroute... opens the same autorouter as the `--autoroute` command, so you can realise one view from the other without leaving the app. The dialog asks for the toggles first: the target view, whether the nets come from the other view or from the declared `nets`, which nets (all, only unrouted, or only those of the selected part), whether to place missing parts and keep existing wires, and the options of the chosen view (crossings, labels, clearance and preference for the schematic; jumper style, colour and maximum length for the breadboard). It also shows the equivalent command line.
+
+Preview runs the autorouter in the background and shows the result on the canvas, with the new parts and wires highlighted, a list of the nets that could not be routed, and no change to your circuit. Apply commits the result as one undo step (Ctrl+Z puts everything back) and switches to Edit mode so you can save it. Changing a toggle or closing the dialog discards the preview.
 
 ## File formats
 
