@@ -4,7 +4,7 @@
 //! 1 some nets failed (OUT is still written), 2 unreadable input, bad arguments or unwritable
 //! output.
 
-use super::{port, JumperColor, JumperStyle, Prefer, RouteOptions, Scope, Source};
+use super::{port, JumperColor, JumperStyle, Prefer, RouteOptions, Scope, Source, MAX_CLEARANCE, MAX_JUMPER};
 use crate::color::is_valid_color_spec;
 use crate::model::View;
 use crate::resolve::Library;
@@ -16,10 +16,13 @@ fn need<'a>(args: &'a [String], i: usize, flag: &str) -> Result<&'a str, String>
     args.get(i + 1).map(|s| s.as_str()).ok_or_else(|| format!("{flag} needs a value"))
 }
 
-fn parse_int(s: &str, flag: &str, min: i32) -> Result<i32, String> {
+fn parse_int(s: &str, flag: &str, min: i32, max: i32) -> Result<i32, String> {
     let v: i32 = s.trim().parse().map_err(|_| format!("{flag}: \"{s}\" is not a whole number"))?;
     if v < min {
         return Err(format!("{flag}: {v} is too small (minimum {min})"));
+    }
+    if v > max {
+        return Err(format!("{flag}: {v} is too large (maximum {max})"));
     }
     Ok(v)
 }
@@ -85,7 +88,7 @@ pub fn parse_args(args: &[String]) -> Result<(Vec<String>, RouteOptions), String
                     _ => return Err(format!("--prefer: \"{v}\" is not bends or length")),
                 };
             }
-            "--clearance" => o.clearance = parse_int(need(args, i, a)?, a, 0)?,
+            "--clearance" => o.clearance = parse_int(need(args, i, a)?, a, 0, MAX_CLEARANCE)?,
             "--no-labels" => {
                 o.label_fallback = false;
                 takes_value = false;
@@ -109,7 +112,7 @@ pub fn parse_args(args: &[String]) -> Result<(Vec<String>, RouteOptions), String
                     return Err(format!("--jumper-color: \"{v}\" is not by-net or a colour (see --list-colors)"));
                 };
             }
-            "--max-jumper" => o.max_jumper_len = Some(parse_int(need(args, i, a)?, a, 1)?),
+            "--max-jumper" => o.max_jumper_len = Some(parse_int(need(args, i, a)?, a, 1, MAX_JUMPER)?),
             _ if a.starts_with("--") => return Err(format!("unknown option {a}")),
             _ => {
                 positional.push(a.to_string());
@@ -172,7 +175,7 @@ pub fn run_with(args: &[String], out: &mut dyn Write, err: &mut dyn Write) -> i3
     let dir = inp.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let lib = Library::load(&circuit, Some(dir));
     let outcome = port(&circuit, &lib, &opts);
-    if let Err(e) = std::fs::write(outp, write::circuit_to_string(&outcome.circuit)) {
+    if let Err(e) = write::write_atomic(outp, &write::circuit_to_string(&outcome.circuit)) {
         let _ = writeln!(err, "error: cannot write {}: {e}", outp.display());
         return 2;
     }
@@ -257,6 +260,10 @@ mod tests {
             ("--jumper wavy", "--jumper"),
             ("--jumper-color nocolour", "--jumper-color"),
             ("--max-jumper 0", "too small"),
+            ("--clearance 101", "too large"),
+            ("--clearance 2147483647", "maximum 100"),
+            ("--max-jumper 1000001", "too large"),
+            ("--max-jumper 2147483647", "maximum 1000000"),
             ("--max-jumper", "needs a value"),
             ("--frobnicate", "unknown option"),
             ("stray", "unexpected argument"),
@@ -264,6 +271,12 @@ mod tests {
             let e = parse_options(&args(bad)).expect_err(bad);
             assert!(e.contains(needle), "{bad}: {e}");
         }
+    }
+
+    #[test]
+    fn the_limits_themselves_are_accepted() {
+        let o = parse_options(&args("--clearance 100 --max-jumper 1000000")).unwrap();
+        assert_eq!((o.clearance, o.max_jumper_len), (100, Some(1_000_000)));
     }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
@@ -301,6 +314,66 @@ mod tests {
         assert_eq!(validate(&c, &lib).errors, 0);
         // canonical: writing the parsed output gives the same bytes
         assert_eq!(write::circuit_to_string(&c), text);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn huge_option_values_are_an_error_not_a_panic() {
+        let dir = temp_dir("huge");
+        let inp = dir.join("led.circ");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v1/led.circ"), &inp).unwrap();
+        let out = dir.join("out.circ");
+        for (flag, value) in [("--clearance", "2147483647"), ("--clearance", "101"), ("--max-jumper", "2147483647")] {
+            let a = vec![inp.display().to_string(), out.display().to_string(), flag.into(), value.into()];
+            // Regression: clearance 2147483647 overflowed `2 * clearance` (exit 101 in debug builds).
+            let (code, stdout, stderr) = run_capture(&a);
+            assert_eq!(code, 2, "{flag} {value}: {stdout} {stderr}");
+            assert!(stderr.contains("too large") && stderr.contains(flag), "{stderr}");
+        }
+        assert!(!out.exists());
+        // Library callers can pass anything: the values are clamped, never overflow.
+        let c = parse_circuit(
+            r#"{"format":"short-circ/2","parts":[{"id":"R1","type":"resistor"},{"id":"R2","type":"resistor"}],
+            "nets":[{"pins":["R1.b","R2.a"]}]}"#,
+        )
+        .unwrap();
+        let lib = Library::load(&c, None);
+        for to in [View::Schematic, View::Breadboard] {
+            let o = RouteOptions { to, source: Source::Declared, clearance: i32::MAX, max_jumper_len: Some(i32::MAX), ..RouteOptions::default() };
+            assert_eq!(port(&c, &lib, &o).failures, vec![], "{to:?}");
+            let o = RouteOptions { clearance: i32::MIN, max_jumper_len: Some(i32::MIN), ..o };
+            let _ = port(&c, &lib, &o);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_writes_the_output_atomically() {
+        let dir = temp_dir("atomic");
+        let inp = dir.join("led.circ");
+        std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/v1/led.circ"), &inp).unwrap();
+        let out = dir.join("out.circ");
+        std::fs::write(&out, "previous").unwrap();
+        let listing = |d: &std::path::Path| {
+            let mut v: Vec<String> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            v.sort();
+            v
+        };
+        let a = vec![inp.display().to_string(), out.display().to_string()];
+        let (code, stdout, stderr) = run_capture(&a);
+        assert_eq!(code, 0, "{stdout} {stderr}");
+        assert!(std::fs::read_to_string(&out).unwrap().contains("short-circ/2"));
+        assert_eq!(listing(&dir), ["led.circ", "out.circ"], "no temporary file left");
+        // The target cannot be replaced (a directory): exit 2, the input and the directory stay.
+        let blocked = dir.join("blocked.circ");
+        std::fs::create_dir(&blocked).unwrap();
+        let before = std::fs::read_to_string(&inp).unwrap();
+        let (code, _, stderr) = run_capture(&[inp.display().to_string(), blocked.display().to_string()]);
+        assert_eq!(code, 2);
+        assert!(stderr.contains("cannot write"), "{stderr}");
+        assert!(blocked.is_dir());
+        assert_eq!(std::fs::read_to_string(&inp).unwrap(), before);
+        assert_eq!(listing(&dir), ["blocked.circ", "led.circ", "out.circ"], "no temporary file left");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

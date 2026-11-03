@@ -64,7 +64,7 @@ fn place_missing(c: &mut Circuit, lib: &dyn PartLookup, nets: &[SrcNet], opts: &
     // The gap between bodies: at least 4, wide enough for both clearance zones, and with room
     // for routing channels that grows with the number of nets (a 1-cell channel carries one wire).
     let tracks = (2 + nets.len() as i32 / 6).min(8);
-    let margin = (2 * opts.clearance + 2 + tracks).max(4);
+    let margin = opts.clearance.clamp(0, super::MAX_CLEARANCE).saturating_mul(2).saturating_add(2 + tracks).max(4);
     let mut rects = placed_rects(c, lib);
     let idx = part_index(c);
 
@@ -454,7 +454,7 @@ fn route(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[Src
     }
 
     // Part rectangles and region.
-    let clearance = opts.clearance.max(0);
+    let clearance = opts.clearance.clamp(0, super::MAX_CLEARANCE);
     let mut prect: HashMap<&str, Rect> = HashMap::new();
     let mut rects: Vec<Rect> = Vec::new();
     for p in &c.parts {

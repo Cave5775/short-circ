@@ -144,9 +144,22 @@ pub(crate) struct Acc {
     pub failures: Vec<RouteFailure>,
 }
 
+/// Largest `--clearance` (grid units); larger values only waste time and could overflow.
+pub const MAX_CLEARANCE: i32 = 100;
+/// Largest `--max-jumper` (grid units); the coordinate range is smaller than this anyway.
+pub const MAX_JUMPER: i32 = 1_000_000;
+
 /// Port the circuit into `opts.to`. Never fails as a whole: unroutable nets are reported in
-/// `failures` and the rest is still produced.
+/// `failures` and the rest is still produced. Option values outside their documented range
+/// (`clearance` 0..=[`MAX_CLEARANCE`], `max_jumper_len` at most [`MAX_JUMPER`]) are clamped, so no
+/// caller can overflow the grid arithmetic.
 pub fn port(circuit: &Circuit, lib: &dyn PartLookup, opts: &RouteOptions) -> RouteOutcome {
+    let clamped = RouteOptions {
+        clearance: opts.clearance.clamp(0, MAX_CLEARANCE),
+        max_jumper_len: opts.max_jumper_len.map(|m| m.min(MAX_JUMPER)),
+        ..opts.clone()
+    };
+    let opts = &clamped;
     let mut c = circuit.clone();
     let mut acc = Acc::default();
     if !opts.keep_wires {
