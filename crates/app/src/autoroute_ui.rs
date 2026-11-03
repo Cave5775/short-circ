@@ -628,8 +628,14 @@ impl AutorouteUi {
         }
 
         ui.separator();
-        ui.label("Equivalent command line:");
         let cmd = command_line(&self.opts, env.file_name);
+        ui.horizontal(|ui| {
+            ui.label("Equivalent command line:");
+            if ui.button("Copy").on_hover_text("Copy the command to the clipboard").clicked() {
+                ui.ctx().copy_text(cmd.clone());
+            }
+        });
+        // Read-only but selectable: drag to select, Ctrl+C copies the selection.
         ui.add(egui::TextEdit::multiline(&mut cmd.as_str()).desired_width(f32::INFINITY).desired_rows(2).font(egui::TextStyle::Monospace));
 
         // Buttons.
