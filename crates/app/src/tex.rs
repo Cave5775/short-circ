@@ -37,6 +37,15 @@ pub struct Raster {
     pub rgba_premultiplied: Vec<u8>,
 }
 
+/// usvg options for untrusted artwork: an `<image href>` that is not an embedded `data:` image
+/// resolves to nothing (the default string resolver would read local files). Whether embedded
+/// images are drawn at all depends on resvg's raster-image feature, which is not compiled in.
+fn svg_options() -> resvg::usvg::Options<'static> {
+    let mut opt = resvg::usvg::Options::default();
+    opt.image_href_resolver.resolve_string = Box::new(|_, _| None);
+    opt
+}
+
 /// Rasterise a view's `svg` artwork stretched over `size` (the same stretch as `render_svg`) with
 /// its long side at `long_px` pixels. `Err` when the source is unusable (not SVG, script, ...).
 pub fn rasterize(svg: &str, size: [f64; 2], long_px: u32) -> Result<Raster, String> {
@@ -44,7 +53,7 @@ pub fn rasterize(svg: &str, size: [f64; 2], long_px: u32) -> Result<Raster, Stri
         return Err("part has an empty size".into());
     }
     let doc = short_circ_core::svg::artwork_document(svg, size).ok_or("not a usable SVG document")?;
-    let tree = resvg::usvg::Tree::from_str(&doc, &resvg::usvg::Options::default()).map_err(|e| e.to_string())?;
+    let tree = resvg::usvg::Tree::from_str(&doc, &svg_options()).map_err(|e| e.to_string())?;
     let (w, h) = raster_size(size, long_px);
     let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h).ok_or("cannot allocate the image")?;
     let ts = resvg::tiny_skia::Transform::from_scale(w as f32 / tree.size().width(), h as f32 / tree.size().height());
@@ -164,6 +173,28 @@ mod tests {
         assert!(rasterize("not svg", [2.0, 2.0], 64).is_err());
         assert!(rasterize("<svg xmlns='http://www.w3.org/2000/svg'><script/></svg>", [2.0, 2.0], 64).is_err());
         assert!(rasterize(ART, [0.0, 2.0], 64).is_err());
+    }
+
+    #[test]
+    fn external_images_are_never_loaded() {
+        // A real local SVG file: the default resolver would load it, ours must not.
+        let dir = std::env::temp_dir().join(format!("short-circ-tex-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("secret.svg");
+        std::fs::write(&file, "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'><rect width='4' height='4'/></svg>").unwrap();
+        let opt = svg_options();
+        let href = file.to_string_lossy().to_string();
+        assert!((opt.image_href_resolver.resolve_string)(&href, &opt).is_none());
+        assert!((opt.image_href_resolver.resolve_string)("secret.svg", &opt).is_none());
+        let default = resvg::usvg::Options::default();
+        assert!((default.image_href_resolver.resolve_string)(&href, &default).is_some(), "the premise: the default resolver reads files");
+        // Embedded data images still reach the data resolver.
+        let data = b"<svg xmlns='http://www.w3.org/2000/svg' width='1' height='1'/>".to_vec();
+        assert!((opt.image_href_resolver.resolve_data)("image/svg+xml", std::sync::Arc::new(data), &opt).is_some());
+        // Through the rasteriser the part is refused outright (sanitiser) or draws nothing from the file.
+        let art = format!("<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' viewBox='0 0 4 4'><image xlink:href='{}' width='4' height='4'/></svg>", href.replace('\\', "/"));
+        assert!(rasterize(&art, [2.0, 2.0], 64).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
