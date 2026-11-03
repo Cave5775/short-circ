@@ -136,6 +136,61 @@ pub fn parse_options(args: &[String]) -> Result<RouteOptions, String> {
     }
 }
 
+/// The `--autoroute` option flags that reproduce `o` (only those that differ from
+/// `RouteOptions::default()`), the inverse of [`parse_options`]: `parse_options(&options_to_args(&o))`
+/// gives `o` back. Exceptions are values the parser rejects (an empty `Scope::Only`, a
+/// `max_jumper_len` below 1, a negative clearance), which have no command line form.
+pub fn options_to_args(o: &RouteOptions) -> Vec<String> {
+    let d = RouteOptions::default();
+    let mut a: Vec<String> = Vec::new();
+    let mut flag = |name: &str, value: Option<String>| {
+        a.push(name.to_string());
+        a.extend(value);
+    };
+    if o.to != d.to {
+        flag("--to", Some(o.to.key().to_string()));
+    }
+    if o.source == Source::Declared {
+        flag("--from-nets", None);
+    }
+    match &o.scope {
+        Scope::All => {}
+        Scope::Unrouted => flag("--scope", Some("unrouted".into())),
+        Scope::Only(refs) if !refs.is_empty() => flag("--only", Some(refs.join(","))),
+        Scope::Only(_) => {}
+    }
+    if !o.place_missing {
+        flag("--no-place", None);
+    }
+    if !o.keep_wires {
+        flag("--replace", None);
+    }
+    if o.allow_crossings {
+        flag("--crossings", None);
+    }
+    if o.prefer != d.prefer {
+        flag("--prefer", Some("length".into()));
+    }
+    if o.clearance != d.clearance {
+        flag("--clearance", Some(o.clearance.to_string()));
+    }
+    if !o.label_fallback {
+        flag("--no-labels", None);
+    }
+    match o.jumper_style {
+        JumperStyle::Orthogonal => {}
+        JumperStyle::Straight => flag("--jumper", Some("straight".into())),
+        JumperStyle::Diagonal45 => flag("--jumper", Some("diagonal".into())),
+    }
+    if let JumperColor::Single(spec) = &o.jumper_color {
+        flag("--jumper-color", Some(spec.clone()));
+    }
+    if let Some(n) = o.max_jumper_len {
+        flag("--max-jumper", Some(n.to_string()));
+    }
+    a
+}
+
 /// Run `--autoroute`; `args` are the arguments after the flag. Prints to stdout / stderr.
 pub fn run(args: &[String]) -> i32 {
     run_with(args, &mut std::io::stdout(), &mut std::io::stderr())
@@ -242,6 +297,59 @@ mod tests {
         // --only wins over --scope, in either order
         assert_eq!(parse_options(&args("--only R1.a --scope unrouted")).unwrap().scope, Scope::Only(vec!["R1.a".into()]));
         assert_eq!(parse_options(&args("--scope unrouted --only R1.a")).unwrap().scope, Scope::Only(vec!["R1.a".into()]));
+    }
+
+    #[test]
+    fn options_to_args_round_trips_through_parse_options() {
+        let d = RouteOptions::default;
+        let sets = [
+            d(),
+            RouteOptions { to: View::Schematic, ..d() },
+            RouteOptions { source: Source::Declared, ..d() },
+            RouteOptions { scope: Scope::Unrouted, ..d() },
+            RouteOptions { scope: Scope::Only(vec!["R1.a".into()]), ..d() },
+            RouteOptions { scope: Scope::Only(vec!["R1.a".into(), "B1.pos".into(), "U1.12".into()]), ..d() },
+            RouteOptions { place_missing: false, ..d() },
+            RouteOptions { keep_wires: false, ..d() },
+            RouteOptions { allow_crossings: true, ..d() },
+            RouteOptions { prefer: Prefer::Length, ..d() },
+            RouteOptions { clearance: 0, ..d() },
+            RouteOptions { clearance: 6, ..d() },
+            RouteOptions { label_fallback: false, ..d() },
+            RouteOptions { jumper_style: JumperStyle::Straight, ..d() },
+            RouteOptions { jumper_style: JumperStyle::Diagonal45, ..d() },
+            RouteOptions { jumper_color: JumperColor::Single("teal".into()), ..d() },
+            RouteOptions { jumper_color: JumperColor::Single("#12ab34".into()), ..d() },
+            RouteOptions { max_jumper_len: Some(1), ..d() },
+            RouteOptions { max_jumper_len: Some(24), ..d() },
+            RouteOptions {
+                to: View::Schematic,
+                source: Source::Declared,
+                scope: Scope::Only(vec!["R1.a".into()]),
+                place_missing: false,
+                keep_wires: false,
+                allow_crossings: true,
+                prefer: Prefer::Length,
+                clearance: 3,
+                label_fallback: false,
+                jumper_style: JumperStyle::Diagonal45,
+                jumper_color: JumperColor::Single("red".into()),
+                max_jumper_len: Some(9),
+            },
+        ];
+        for o in sets {
+            let a = options_to_args(&o);
+            assert_eq!(parse_options(&a), Ok(o.clone()), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn options_to_args_only_emits_what_differs_from_the_defaults() {
+        assert!(options_to_args(&RouteOptions::default()).is_empty());
+        let o = RouteOptions { to: View::Schematic, clearance: 2, scope: Scope::Only(vec!["R1.a".into(), "B1.pos".into()]), ..RouteOptions::default() };
+        assert_eq!(options_to_args(&o), args("--to schematic --only R1.a,B1.pos --clearance 2"));
+        let o = RouteOptions { jumper_color: JumperColor::Single("#ff0000".into()), keep_wires: false, ..RouteOptions::default() };
+        assert_eq!(options_to_args(&o), args("--replace --jumper-color #ff0000"));
     }
 
     #[test]
