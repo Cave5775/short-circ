@@ -110,7 +110,7 @@ fn led_declared() -> Circuit {
 }
 
 fn led_example() -> Circuit {
-    parse_circuit(include_str!("../../../../examples/led.circ")).unwrap()
+    parse_circuit(include_str!("../../tests/fixtures/v1/led.circ")).unwrap()
 }
 
 fn declared(o: View) -> RouteOptions {

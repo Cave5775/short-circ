@@ -66,8 +66,14 @@ fn looks_like_v1_part(v: &Value) -> bool {
     v.get("size").is_some()
 }
 
+/// Editors and PowerShell 5.1's `Set-Content -Encoding utf8` write a UTF-8 byte order mark, which
+/// JSON parsers reject with an opaque "expected value at line 1 column 1"; accept it on read.
+fn strip_bom(src: &str) -> &str {
+    src.strip_prefix('\u{feff}').unwrap_or(src)
+}
+
 pub fn parse_circuit(src: &str) -> Result<Circuit, ParseError> {
-    let mut v: Value = serde_json::from_str(src).map_err(err)?;
+    let mut v: Value = serde_json::from_str(strip_bom(src)).map_err(err)?;
     if !v.is_object() {
         return Err(ParseError("a circuit file must be a JSON object".into()));
     }
@@ -95,7 +101,7 @@ pub fn parse_circuit(src: &str) -> Result<Circuit, ParseError> {
 }
 
 pub fn parse_part(src: &str) -> Result<PartDef, ParseError> {
-    let v: Value = serde_json::from_str(src).map_err(err)?;
+    let v: Value = serde_json::from_str(strip_bom(src)).map_err(err)?;
     part_from_value(v, None)
 }
 
@@ -259,6 +265,14 @@ impl V1PartDef {
 mod tests {
     use super::*;
     use crate::model::View;
+
+    #[test]
+    fn a_utf8_byte_order_mark_is_accepted() {
+        let c = parse_circuit("\u{feff}{\"format\":\"short-circ/2\"}").unwrap();
+        assert!(c.parts.is_empty());
+        let p = parse_part("\u{feff}{\"format\":\"short-circ/2\",\"type\":\"x\"}").unwrap();
+        assert_eq!(p.ty, "x");
+    }
 
     #[test]
     fn v1_circuit_is_upgraded() {

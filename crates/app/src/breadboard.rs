@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn schematic_only_parts_are_not_in_the_order() {
-        let mut c = short_circ_core::parse_circuit(include_str!("../../../examples/led.circ")).unwrap();
+        let mut c = short_circ_core::parse_circuit(include_str!("../../core/tests/fixtures/v1/led.circ")).unwrap();
         let lib = Library::load(&c, None);
         assert!(draw_order(&c, &lib).is_empty());
         c.parts[0].breadboard = Some(Placement::at(1, 1));

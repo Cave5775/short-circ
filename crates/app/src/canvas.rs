@@ -854,7 +854,7 @@ mod tests {
 
     #[test]
     fn hit_testing_on_example() {
-        let c = short_circ_core::parse_circuit(include_str!("../../../examples/led.circ")).unwrap();
+        let c = short_circ_core::parse_circuit(include_str!("../../core/tests/fixtures/v1/led.circ")).unwrap();
         let lib = Library::load(&c, None);
         let sch = ModelView::Schematic;
         // R1 at (14,6): pin a is local (0,1) -> world (14,7).

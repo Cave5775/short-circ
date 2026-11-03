@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn led_example_has_nets_and_svg() {
-        let c = parse_circuit_text(include_str!("../../../examples/led.circ")).unwrap();
+        let c = parse_circuit_text(include_str!("../../core/tests/fixtures/v1/led.circ")).unwrap();
         let lib = Library::load(&c, None);
         let nets = build_nets(&c, &lib, View::Schematic);
         assert!(nets.of_pin("R1", "a").is_some());
