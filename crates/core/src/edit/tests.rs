@@ -121,6 +121,53 @@ fn add_and_remove_part() {
     assert!(matches!(apply(&mut c.clone(), &l, Edit::RemovePart { id: "zz".into() }), Err(EditError::UnknownPart(_))));
 }
 
+fn net(name: &str, pins: &[&str]) -> crate::model::NetDecl {
+    crate::model::NetDecl { name: Some(name.into()), pins: pins.iter().map(|s| s.to_string()).collect() }
+}
+
+#[test]
+fn remove_part_strips_declared_nets_and_undo_restores_them() {
+    let l = lib();
+    let mut c0 = circuit();
+    c0.nets = vec![net("VCC", &["R1.a", "R2.a"]), net("ONLY", &["R2.b"]), net("GND", &["R1.b", "R2.b"]), net("EMPTY", &[])];
+    let bad_nets = |c: &Circuit| crate::validate(c, &l).issues.iter().filter(|i| i.rule == "bad-net").count();
+    assert_eq!(bad_nets(&c0), 0);
+    // Regression: R2 stayed in `nets` and every reference to it became a `bad-net` error.
+    let c = roundtrip(&c0, Edit::RemovePart { id: "R2".into() });
+    assert_eq!(bad_nets(&c), 0);
+    let shape: Vec<(String, Vec<String>)> = c.nets.iter().map(|n| (n.name.clone().unwrap(), n.pins.clone())).collect();
+    assert_eq!(
+        shape,
+        vec![
+            ("VCC".to_string(), vec!["R1.a".to_string()]),
+            ("GND".to_string(), vec!["R1.b".to_string()]),
+            ("EMPTY".to_string(), vec![]),
+        ],
+        "ONLY lost its last pin and is dropped; a net that was already empty stays"
+    );
+    // Through a grouped History as the editor does it: one undo brings everything back.
+    let mut c = c0.clone();
+    let mut h = History::new();
+    h.begin_group();
+    h.apply(&mut c, &l, Edit::RemovePart { id: "R1".into() }).unwrap();
+    h.apply(&mut c, &l, Edit::RemovePart { id: "R2".into() }).unwrap();
+    h.end_group();
+    assert!(c.nets.iter().all(|n| n.name.as_deref() == Some("EMPTY")));
+    assert!(h.undo(&mut c));
+    assert_eq!(ctext(&c), ctext(&c0));
+}
+
+#[test]
+fn remove_part_keeps_references_owned_by_a_dotted_part_id() {
+    let l = lib();
+    let mut c = circuit();
+    c.parts.push(part("R1.x", Some([50, 10]), None));
+    c.nets = vec![net("N", &["R1.a", "R1.x.a"])];
+    apply(&mut c, &l, Edit::RemovePart { id: "R1".into() }).unwrap();
+    assert_eq!(c.nets[0].pins, vec!["R1.x.a".to_string()]);
+    assert_eq!(crate::validate(&c, &l).issues.iter().filter(|i| i.rule == "bad-net").count(), 0);
+}
+
 #[test]
 fn set_placement_some_and_none() {
     let c0 = circuit();

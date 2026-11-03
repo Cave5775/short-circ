@@ -218,6 +218,23 @@ pub fn apply(c: &mut Circuit, lib: &dyn PartLookup, edit: Edit) -> Result<(), Ed
         Edit::RemovePart { id } => {
             let i = part_idx(c, &id)?;
             c.parts.remove(i);
+            // A declared net must not name a part that no longer exists (`bad-net`): strip its
+            // pins, and drop the nets this leaves empty. A reference that another remaining part
+            // can own (ids may contain dots, `A.B.c` may be part `A.B` pin `c`) stays.
+            let prefix = format!("{id}.");
+            let parts = &c.parts;
+            let owned = |r: &str| r.match_indices('.').any(|(i, _)| parts.iter().any(|p| p.id == r[..i]));
+            let mut emptied = Vec::new();
+            for (k, n) in c.nets.iter_mut().enumerate() {
+                let before = n.pins.len();
+                n.pins.retain(|r| !r.starts_with(&prefix) || owned(r));
+                if n.pins.is_empty() && before > 0 {
+                    emptied.push(k);
+                }
+            }
+            for k in emptied.into_iter().rev() {
+                c.nets.remove(k);
+            }
         }
         Edit::SetPlacement { id, view, placement } => {
             let i = part_idx(c, &id)?;
