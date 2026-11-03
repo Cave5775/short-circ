@@ -4,6 +4,7 @@
 
 use crate::canvas::{self, Camera, DrawCtx, Highlight};
 use crate::editor::props::{self, ColorField};
+use crate::editor::vertex;
 use crate::editor::{
     hit, Button, Command, EditCtx, EditorState, Event, Item, Key, Mods, Selection, Tool,
 };
@@ -276,7 +277,24 @@ impl EditUi {
                     if let Some(w) = circuit.wires.iter().find(|w| &w.id == id) {
                         let pts: Vec<Pos2> = w.pts.iter().map(|p| d.pt([p[0] as f64, p[1] as f64])).collect();
                         let width = d.px(0.3).max(3.0);
-                        d.painter.add(Shape::line(pts, Stroke::new(width, t.select.gamma_multiply(0.55))));
+                        d.painter.add(Shape::line(pts.clone(), Stroke::new(width, t.select.gamma_multiply(0.55))));
+                        // Handles only when this is the one selected wire (what a press grabs).
+                        if sel.single().is_some() {
+                            let h = d.px(0.22).max(4.0);
+                            for (_, mid, _) in vertex::bend_handles(&w.pts) {
+                                let c = d.pt(mid);
+                                d.painter.circle_filled(c, h * 0.8, t.bg.gamma_multiply(0.9));
+                                d.painter.circle_stroke(c, h * 0.8, Stroke::new(1.2, t.select));
+                                let arm = h * 0.45;
+                                d.painter.line_segment([c - Vec2::new(arm, 0.0), c + Vec2::new(arm, 0.0)], Stroke::new(1.2, t.select));
+                                d.painter.line_segment([c - Vec2::new(0.0, arm), c + Vec2::new(0.0, arm)], Stroke::new(1.2, t.select));
+                            }
+                            for p in &pts {
+                                let r = Rect::from_center_size(*p, Vec2::splat(h * 1.6));
+                                d.painter.rect_filled(r, 1.0, t.select);
+                                d.painter.rect_stroke(r, 1.0, Stroke::new(1.0, t.bg), egui::StrokeKind::Outside);
+                            }
+                        }
                     }
                 }
                 Item::Label(k) => {

@@ -82,7 +82,10 @@ pub struct RouteOptions {
     /// Keep wires already in the target view (they count as routed connections and as
     /// obstacles). When false they are removed first.
     pub keep_wires: bool,
-    /// Schematic: allow wires to cross (perpendicular, no junction) instead of detouring.
+    /// Allow wires to cross instead of detouring. Schematic: perpendicular crossings without a
+    /// junction. Breadboard: a jumper may pass over another jumper; when false every jumper
+    /// keeps clear of the wires already there (detouring if it must) and a net that cannot is
+    /// reported as a failure.
     pub allow_crossings: bool,
     pub prefer: Prefer,
     /// Schematic: grid units kept free around part bodies of other parts.

@@ -81,7 +81,6 @@ pub fn normalized(o: &RouteOptions) -> RouteOptions {
             o.max_jumper_len = d.max_jumper_len;
         }
         View::Breadboard => {
-            o.allow_crossings = d.allow_crossings;
             o.prefer = d.prefer;
             o.clearance = d.clearance;
             o.label_fallback = d.label_fallback;
@@ -581,6 +580,8 @@ impl AutorouteUi {
             }
             View::Breadboard => {
                 ui.separator();
+                ui.checkbox(&mut self.opts.allow_crossings, "Allow wire crossings")
+                    .on_hover_text("Jumpers may pass over other jumpers. Off: each jumper detours around the wires already placed, and a net that cannot is reported");
                 ui.horizontal(|ui| {
                     ui.label("Jumper style:");
                     ui.radio_value(&mut self.opts.jumper_style, JumperStyle::Straight, "Straight");
@@ -829,7 +830,11 @@ mod tests {
             jumper_style: JumperStyle::Straight,
             ..RouteOptions::default()
         };
-        assert_eq!(command_line(&o, Some("my led.circ")), "short-circ.exe --autoroute \"my led.circ\" routed.circ --to breadboard --jumper straight");
+        // Crossings apply to both views; clearance, prefer and labels only to the schematic.
+        assert_eq!(
+            command_line(&o, Some("my led.circ")),
+            "short-circ.exe --autoroute \"my led.circ\" routed.circ --to breadboard --crossings --jumper straight"
+        );
         let o = RouteOptions {
             to: View::Schematic,
             jumper_color: JumperColor::Single("#112233".into()),

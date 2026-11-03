@@ -591,7 +591,7 @@ pub fn draw_text(d: &DrawCtx, at: Pos2, text: &str, size_units: f64, anchor: Anc
         Anchor::Middle => Align2::CENTER_BOTTOM,
         Anchor::End => Align2::RIGHT_BOTTOM,
     };
-    d.painter.text(at + Vec2::new(0.0, px * 0.15), align, text, FontId::proportional(px), color);
+    labels::paint_legible(d.painter, at + Vec2::new(0.0, px * 0.15), align, text, px, color, d.theme.bg);
 }
 
 fn draw_poly(d: &DrawCtx, pal: &Palette, part: &Part, pl: &Placement, pts: &[[f64; 2]], closed: bool, style: &Style) {

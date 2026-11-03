@@ -252,10 +252,13 @@ fn click_selects_part_wire_and_label_and_empty_clears() {
     let mut r = base();
     r.click(18.0, 10.0); // R1 body
     assert_eq!(r.ed.selection().items, set(&[part("R1")]));
-    r.click(24.0, 10.0); // wire w1
-    assert_eq!(r.ed.selection().items, set(&[wire_item("w1")]));
     r.click(26.0, 10.0); // pin D1.anode selects the part, not the wire end
     assert_eq!(r.ed.selection().items, set(&[part("D1")]));
+    r.click(24.0, 10.0); // wire w1
+    assert_eq!(r.ed.selection().items, set(&[wire_item("w1")]));
+    // Once the wire is selected its ends are handles: the pin under one no longer steals the click.
+    r.click(26.0, 10.0);
+    assert_eq!(r.ed.selection().items, set(&[wire_item("w1")]));
     // The label's text sits up and to the right of its point.
     r.click(4.5, 8.2);
     assert_eq!(r.ed.selection().items, set(&[Item::Label(0)]));
@@ -1602,4 +1605,136 @@ fn reset_and_cancel_all_forget_everything_in_progress() {
     assert!(!r.ed.selection().is_empty());
     r.ed.reset();
     assert!(r.ed.selection().is_empty() && !r.ed.has_clipboard());
+}
+
+// ---- single wire points: ends, bends --------------------------------------------------------
+
+const JUMPER: &str = r#"{"format":"short-circ/2","parts":[],
+ "wires":[{"id":"j1","view":"breadboard","pts":[[0,0],[10,0]]}]}"#;
+
+fn jumper_rig() -> Rig {
+    Rig::from_json(JUMPER, View::Breadboard)
+}
+
+#[test]
+fn dragging_a_wire_end_moves_only_that_end() {
+    let mut r = jumper_rig();
+    // Nothing selected yet: pressing the end of the jumper grabs the end, not the whole wire.
+    r.drag((10.0, 0.0), (10.0, 5.0));
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [10, 5]]);
+    assert_eq!(r.ed.selection().items, set(&[wire_item("j1")]));
+    r.drag((0.0, 0.0), (-3.0, 2.0));
+    assert_eq!(r.wire_pts("j1"), vec![[-3, 2], [10, 5]]);
+    // One undo step per drag.
+    assert!(r.h.undo(&mut r.c));
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [10, 5]]);
+    assert!(r.h.undo(&mut r.c));
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [10, 0]]);
+    assert!(!r.can_undo());
+}
+
+#[test]
+fn dragging_the_middle_of_a_wire_still_moves_the_whole_wire() {
+    let mut r = jumper_rig();
+    r.drag((5.0, 0.1), (5.0, 3.0));
+    assert_eq!(r.wire_pts("j1"), vec![[0, 3], [10, 3]]);
+}
+
+#[test]
+fn schematic_wire_end_on_a_pin_of_the_selected_wire_stays_straight() {
+    let mut r = base();
+    r.click(24.0, 10.0);
+    assert_eq!(r.ed.selection().items, set(&[wire_item("w1")]));
+    // (26,10) is D1's pin: with the wire selected the press grabs the wire end, not the part.
+    r.drag((26.0, 10.0), (26.0, 13.0));
+    assert_eq!(r.at("D1"), [26, 9], "the part did not move");
+    assert_eq!(r.wire_pts("w1"), vec![[22, 10], [26, 10], [26, 13]]);
+    assert!(r.h.undo(&mut r.c));
+    assert_eq!(r.wire_pts("w1"), vec![[22, 10], [26, 10]]);
+}
+
+#[test]
+fn dragging_an_end_away_and_back_leaves_no_undo_step() {
+    let mut r = jumper_rig();
+    let before = r.fingerprint();
+    r.mv(10.0, 0.0);
+    r.down(10.0, 0.0);
+    r.mv(10.0, 4.0);
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [10, 4]]);
+    r.mv(10.0, 0.0);
+    r.up(10.0, 0.0);
+    assert_eq!(r.fingerprint(), before);
+    assert!(!r.can_undo());
+}
+
+#[test]
+fn escape_during_an_end_drag_restores_the_wire() {
+    let mut r = jumper_rig();
+    r.mv(10.0, 0.0);
+    r.down(10.0, 0.0);
+    r.mv(14.0, 6.0);
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [14, 6]]);
+    r.key(Key::Escape);
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [10, 0]]);
+    assert!(!r.can_undo());
+}
+
+#[test]
+fn plus_handle_adds_a_bend_that_follows_the_pointer() {
+    let mut r = jumper_rig();
+    r.click(2.0, 0.0);
+    assert_eq!(r.ed.selection().items, set(&[wire_item("j1")]));
+    // The handle sits on the middle of the segment.
+    r.drag((5.0, 0.0), (5.0, 3.0));
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [5, 3], [10, 0]]);
+    assert!(r.h.undo(&mut r.c), "adding and placing the bend is one undo step");
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [10, 0]]);
+    assert!(!r.can_undo());
+}
+
+#[test]
+fn clicking_a_plus_handle_without_moving_keeps_the_bend() {
+    let mut r = jumper_rig();
+    r.click(2.0, 0.0);
+    r.click(5.0, 0.0);
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [5, 0], [10, 0]]);
+    // A bend can be dragged afterwards like any point.
+    r.drag((5.0, 0.0), (5.0, -2.0));
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [5, -2], [10, 0]]);
+}
+
+#[test]
+fn alt_press_on_a_wire_adds_a_bend_at_that_point() {
+    let mut r = jumper_rig();
+    r.mv(3.0, 0.2);
+    r.ev(Event::PointerDown { pos: [3.0, 0.2], button: Button::Primary, mods: Mods { alt: true, ..Mods::NONE } });
+    r.mv(3.0, 4.0);
+    r.up(3.0, 4.0);
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [3, 4], [10, 0]]);
+    assert_eq!(r.ed.selection().items, set(&[wire_item("j1")]));
+}
+
+#[test]
+fn double_click_on_a_bend_removes_it_but_not_an_end() {
+    let mut r = jumper_rig();
+    r.click(2.0, 0.0);
+    r.drag((5.0, 0.0), (5.0, 3.0));
+    assert_eq!(r.wire_pts("j1").len(), 3);
+    let fx = r.ev(Event::DoubleClick { pos: [5.0, 3.0] });
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [10, 0]]);
+    assert!(fx.contains(&Effect::CircuitChanged) && !fx.contains(&Effect::OpenProperties));
+    // On an end it opens the properties as before.
+    let fx = r.ev(Event::DoubleClick { pos: [10.0, 0.0] });
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [10, 0]]);
+    assert!(fx.contains(&Effect::OpenProperties));
+}
+
+#[test]
+fn bend_drag_keeps_both_neighbours_in_place() {
+    let mut r = jumper_rig();
+    r.click(2.0, 0.0);
+    r.click(5.0, 0.0);
+    r.drag((5.0, 0.0), (7.0, 6.0));
+    assert_eq!(r.wire_pts("j1"), vec![[0, 0], [7, 6], [10, 0]]);
+    assert!(r.errors().is_empty(), "{:?}", r.errors());
 }

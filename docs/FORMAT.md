@@ -234,7 +234,7 @@ Options (`RouteOptions`), with CLI flag and default:
 | scope | `--scope all\|unrouted`, `--only R1.a,B1.pos` | `all` |
 | place parts missing in the target | `--no-place` to disable | on |
 | keep existing target wires | `--replace` to remove them first | keep |
-| schematic: allow crossings | `--crossings` | off |
+| allow crossings (schematic: wires cross; breadboard: a jumper may pass over another) | `--crossings` | off |
 | prefer fewer bends or shorter length | `--prefer bends\|length` | `bends` |
 | schematic: clearance around other parts (grid units) | `--clearance N` | 1 |
 | schematic: label nets that fail to route | `--no-labels` to disable | on |
@@ -242,7 +242,7 @@ Options (`RouteOptions`), with CLI flag and default:
 | breadboard: jumper colour | `--jumper-color by-net\|<colour>` | `by-net` |
 | breadboard: longest jumper (Manhattan length, grid units) | `--max-jumper N` | unlimited |
 
-Rules: schematic routing is orthogonal on the grid and avoids part bodies (plus clearance), foreign pins and foreign wires, so it introduces no `wire-overlap`, `wire-through-pin` or accidental connection; with crossings off it also introduces no `wire-crossing`. Breadboard placement puts ICs astride the board's centre gap, passives bridging strips, and each pin in its own hole (no `pin-conflict`); leftover nets get jumpers. Parts already placed in the target view are never moved.
+Rules: schematic routing is orthogonal on the grid and avoids part bodies (plus clearance), foreign pins and foreign wires, so it introduces no `wire-overlap`, `wire-through-pin` or accidental connection; with crossings off it also introduces no `wire-crossing`. Breadboard placement puts ICs astride the board's centre gap, passives bridging strips, and each pin in its own hole (no `pin-conflict`); leftover nets get jumpers; with crossings off a jumper never touches another breadboard wire (it takes another shape, then a detour with orthogonal bends, and a net that cannot is reported `failed NET: every jumper route would cross another wire`). Parts already placed in the target view are never moved.
 
 Reference-implementation details:
 - Scope: a net that is already fully connected in the target view counts as routed under `all` and is skipped under `unrouted`. `--only` wins over `--scope`. `--replace` also drops labels that sat on the removed wires.
@@ -253,7 +253,7 @@ Reference-implementation details:
 - Schematic placement keeps new part bodies one unit clear of existing wires and labels, so a new pin never lands on one.
 - `--clearance` is at most 100 and `--max-jumper` at most 1000000 (larger values are argument errors, exit 2; the library clamps them).
 - Failures are printed `failed NET: reason`; when a part could not be placed at all, NET is the part id. OUT is still written and the exit code is 1.
-- Limits: with no crossings and no rotation of placed parts, nets whose pins interleave around one IC cannot all be wired planar-ly. Such nets fall back to net labels, or fail under `--no-labels`. `--crossings` lets them cross instead (the result then has `wire-crossing` warnings).
+- Limits: with no crossings and no rotation of placed parts, nets whose pins interleave around one IC cannot all be wired planar-ly. Such nets fall back to net labels, or fail under `--no-labels`. `--crossings` lets them cross instead (the result then has `wire-crossing` warnings). On the breadboard the strips of a net can run out of free holes that are not walled in by earlier jumpers; with crossings off such a net is reported rather than drawn across, and `--crossings` joins it.
 
 ## CLI contract (`short-circ.exe`)
 Views: `--view schematic|breadboard` where noted; omitted means the default stated.

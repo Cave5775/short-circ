@@ -488,6 +488,155 @@ fn jumper_pts(a: Pt, b: Pt, style: &JumperStyle, obstacles: &[FRect]) -> Vec<Pt>
     }
 }
 
+/// Candidate pairs per group kept when jumpers must not cross: the best one may be boxed in.
+const TRIES_PER_GROUP: usize = 8;
+/// Grid cells around the two ends the detour search may use, and the biggest search area.
+const DETOUR_MARGINS: [i32; 2] = [8, 24];
+const DETOUR_MAX_CELLS: i64 = 40_000;
+
+fn orient(a: Pt, b: Pt, c: Pt) -> i64 {
+    ((b[0] as i64 - a[0] as i64) * (c[1] as i64 - a[1] as i64) - (b[1] as i64 - a[1] as i64) * (c[0] as i64 - a[0] as i64)).signum()
+}
+
+fn in_box(a: Pt, b: Pt, p: Pt) -> bool {
+    p[0] >= a[0].min(b[0]) && p[0] <= a[0].max(b[0]) && p[1] >= a[1].min(b[1]) && p[1] <= a[1].max(b[1])
+}
+
+/// The closed segments `p1-p2` and `p3-p4` share a point (crossing, touching or overlapping).
+fn seg_touch(p1: Pt, p2: Pt, p3: Pt, p4: Pt) -> bool {
+    let (d1, d2, d3, d4) = (orient(p3, p4, p1), orient(p3, p4, p2), orient(p1, p2, p3), orient(p1, p2, p4));
+    (d1 * d2 < 0 && d3 * d4 < 0)
+        || (d1 == 0 && in_box(p3, p4, p1))
+        || (d2 == 0 && in_box(p3, p4, p2))
+        || (d3 == 0 && in_box(p1, p2, p3))
+        || (d4 == 0 && in_box(p1, p2, p4))
+}
+
+/// The breadboard wires placed so far: every segment, and the points where a wire begins or ends
+/// (a bend is not an end).
+#[derive(Default, Clone)]
+struct WireMap {
+    segs: Vec<(Pt, Pt)>,
+    ends: HashSet<Pt>,
+}
+
+impl WireMap {
+    fn add(&mut self, pts: &[Pt]) {
+        self.segs.extend(pts.windows(2).filter(|w| w[0] != w[1]).map(|w| (w[0], w[1])));
+        self.ends.extend(pts.first().into_iter().chain(pts.last()).copied());
+    }
+
+    /// The part of the map that can matter inside the box `lo..=hi` (one cell of slack).
+    fn near(&self, lo: Pt, hi: Pt) -> WireMap {
+        let segs = self
+            .segs
+            .iter()
+            .copied()
+            .filter(|(r, s)| r[0].max(s[0]) >= lo[0] - 1 && r[0].min(s[0]) <= hi[0] + 1 && r[1].max(s[1]) >= lo[1] - 1 && r[1].min(s[1]) <= hi[1] + 1)
+            .collect();
+        WireMap { segs, ends: self.ends.clone() }
+    }
+}
+
+/// The segment `p-q` meets a wire. A wire that ends exactly on one of the jumper's own end points
+/// `ends` is already part of that junction and does not count; a bend there does.
+fn blocked(p: Pt, q: Pt, wires: &WireMap, ends: [Pt; 2]) -> bool {
+    wires.segs.iter().any(|&(r, s)| {
+        let own = ends.iter().any(|e| wires.ends.contains(e) && (*e == r || *e == s));
+        !own && seg_touch(p, q, r, s)
+    })
+}
+
+fn path_crosses(path: &[Pt], wires: &WireMap, ends: [Pt; 2]) -> bool {
+    path.windows(2).any(|w| blocked(w[0], w[1], wires, ends))
+}
+
+/// Points of the jumper from `a` to `b`: the style's shape; when crossings are not allowed and that
+/// shape hits another wire, another simple shape, else a search around the wires on the grid.
+fn jumper_path(a: Pt, b: Pt, opts: &RouteOptions, obstacles: &[FRect], wires: &WireMap) -> Option<Vec<Pt>> {
+    let first = jumper_pts(a, b, &opts.jumper_style, obstacles);
+    if opts.allow_crossings || !path_crosses(&first, wires, [a, b]) {
+        return Some(first);
+    }
+    let mut alts: Vec<Vec<Pt>> = vec![vec![a, b]];
+    if a[0] != b[0] && a[1] != b[1] {
+        alts.push(vec![a, [a[0], b[1]], b]);
+        alts.push(vec![a, [b[0], a[1]], b]);
+    }
+    alts.into_iter().find(|p| !path_crosses(p, wires, [a, b])).or_else(|| detour(a, b, obstacles, wires))
+}
+
+/// Cheapest orthogonal path from `a` to `b` whose unit steps meet no wire of `segs`: bends and
+/// steps over part bodies cost extra. `None` when walled in.
+fn detour(a: Pt, b: Pt, obstacles: &[FRect], wires: &WireMap) -> Option<Vec<Pt>> {
+    // Close to the ends first (short jumpers); a wider search only when that is walled in.
+    DETOUR_MARGINS.iter().find_map(|&m| detour_within(a, b, obstacles, wires, m))
+}
+
+fn detour_within(a: Pt, b: Pt, obstacles: &[FRect], wires: &WireMap, margin: i32) -> Option<Vec<Pt>> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let (lo, hi) = ([a[0].min(b[0]) - margin, a[1].min(b[1]) - margin], [a[0].max(b[0]) + margin, a[1].max(b[1]) + margin]);
+    if (hi[0] - lo[0] + 1) as i64 * (hi[1] - lo[1] + 1) as i64 > DETOUR_MAX_CELLS {
+        return None;
+    }
+    let near = wires.near(lo, hi);
+    let body: Vec<&FRect> = obstacles.iter().filter(|r| !inside(a, r) && !inside(b, r)).collect();
+    const STEP: i32 = 10;
+    const BEND: i32 = 6;
+    const OVER_PART: i32 = 4;
+    const DIRS: [[i32; 2]; 4] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    let mut dist: HashMap<(Pt, u8), i32> = HashMap::new();
+    let mut from: HashMap<(Pt, u8), (Pt, u8)> = HashMap::new();
+    let mut heap = BinaryHeap::new();
+    for d in 0..4u8 {
+        dist.insert((a, d), 0);
+        heap.push(Reverse((0, a, d)));
+    }
+    let mut goal: Option<(Pt, u8)> = None;
+    while let Some(Reverse((cost, p, d))) = heap.pop() {
+        if dist.get(&(p, d)).is_some_and(|&best| best < cost) {
+            continue;
+        }
+        if p == b {
+            goal = Some((p, d));
+            break;
+        }
+        for (nd, step) in DIRS.iter().enumerate() {
+            let q = [p[0] + step[0], p[1] + step[1]];
+            if q[0] < lo[0] || q[0] > hi[0] || q[1] < lo[1] || q[1] > hi[1] || blocked(p, q, &near, [a, b]) {
+                continue;
+            }
+            let turn = if p != a && nd as u8 != d { BEND } else { 0 };
+            let over = if body.iter().any(|r| inside(q, r)) { OVER_PART } else { 0 };
+            let next = cost + STEP + turn + over;
+            let key = (q, nd as u8);
+            if dist.get(&key).is_none_or(|&best| next < best) {
+                dist.insert(key, next);
+                from.insert(key, (p, d));
+                heap.push(Reverse((next, q, nd as u8)));
+            }
+        }
+    }
+    let mut cur = goal?;
+    let mut rev = vec![cur.0];
+    while let Some(&prev) = from.get(&cur) {
+        rev.push(prev.0);
+        cur = prev;
+    }
+    rev.reverse();
+    // Keep the corners only.
+    let mut out: Vec<Pt> = vec![rev[0]];
+    for i in 1..rev.len() - 1 {
+        let (p, q, r) = (rev[i - 1], rev[i], rev[i + 1]);
+        if orient(p, q, r) != 0 {
+            out.push(q);
+        }
+    }
+    out.push(*rev.last()?);
+    Some(out)
+}
+
 fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[SrcNet], pre: &[bool], acc: &mut Acc) {
     let nl = Netlist::build(c, lib, View::Breadboard);
     let geom = &nl.geom;
@@ -522,6 +671,12 @@ fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[S
 
     let mut ids = IdGen::new(c);
     let mut colored = 0usize;
+    // Every segment of the breadboard wires placed so far (existing and new): jumpers keep off
+    // them unless crossings are allowed.
+    let mut wire_map = WireMap::default();
+    for w in c.wires.iter().filter(|w| w.view == View::Breadboard) {
+        wire_map.add(&w.pts);
+    }
     // Usable attach points of a set of strips: free holes plus loose pins.
     let points = |classes: &[usize], occupied: &HashSet<Pt>| -> Vec<Pt> {
         let mut v: Vec<Pt> = Vec::new();
@@ -570,41 +725,55 @@ fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[S
         let mut colour: Option<String> = None;
         while !remaining.is_empty() {
             let tp = points(&tree, &occupied);
-            // Best (manhattan, covered ends, a, b) over every remaining group.
-            let mut best: Option<((i32, i32, Pt, Pt), usize)> = None;
+            // Candidate (manhattan, covered ends, a, b) pairs, best first, over every remaining
+            // group. With crossings allowed the best pair always works; without, a few runners-up
+            // per group are kept for when the best one cannot avoid the wires already placed.
+            let mut cands: Vec<((i32, i32, Pt, Pt), usize)> = Vec::new();
             let mut too_long: Option<i32> = None;
             let mut no_hole = false;
+            let keep = if opts.allow_crossings { 1 } else { TRIES_PER_GROUP };
+            // Without crossings an end must not sit under another wire (a bend or the middle of one).
+            let clear_of_wires = |v: Vec<Pt>| -> Vec<Pt> {
+                if opts.allow_crossings {
+                    v
+                } else {
+                    v.into_iter().filter(|p| !wire_map.segs.iter().any(|&(r, s)| seg_touch(*p, *p, r, s) && !wire_map.ends.contains(p))).collect()
+                }
+            };
+            let tp = clear_of_wires(tp);
             for (ri, &g) in remaining.iter().enumerate() {
-                let gp = points(&[g], &occupied);
+                let gp = clear_of_wires(points(&[g], &occupied));
                 if gp.is_empty() || tp.is_empty() {
                     no_hole = true;
                     continue;
                 }
-                let mut gbest: Option<(i32, i32, Pt, Pt)> = None;
+                let mut keys: Vec<(i32, i32, Pt, Pt)> = Vec::with_capacity(tp.len() * gp.len());
                 for &a in &tp {
                     for &b in &gp {
                         let d = (a[0] - b[0]).abs() + (a[1] - b[1]).abs();
-                        let key = (d, covered(a) as i32 + covered(b) as i32, a, b);
-                        if gbest.is_none_or(|g| key < g) {
-                            gbest = Some(key);
-                        }
+                        keys.push((d, covered(a) as i32 + covered(b) as i32, a, b));
                     }
                 }
-                let Some(k) = gbest else { continue };
+                keys.sort_unstable();
+                let Some(shortest) = keys.first().map(|k| k.0) else { continue };
                 if let Some(max) = opts.max_jumper_len {
-                    if k.0 > max {
-                        too_long = Some(too_long.map_or(k.0, |t| t.min(k.0)));
+                    if shortest > max {
+                        too_long = Some(too_long.map_or(shortest, |t| t.min(shortest)));
                         continue;
                     }
                 }
-                if best.is_none_or(|(b, _)| k < b) {
-                    best = Some((k, ri));
-                }
+                let max = opts.max_jumper_len.unwrap_or(i32::MAX);
+                cands.extend(keys.into_iter().filter(|k| k.0 <= max).take(keep).map(|k| (k, ri)));
             }
-            let Some(((_, _, a, b), ri)) = best else {
-                failure = Some(match (too_long, no_hole) {
-                    (Some(d), _) => format!("jumper too long ({d} > {})", opts.max_jumper_len.unwrap_or(0)),
-                    (None, _) => "no free hole in the strip".to_string(),
+            cands.sort_unstable();
+            let chosen = cands.iter().find_map(|((_, _, a, b), ri)| {
+                jumper_path(*a, *b, opts, &obstacles, &wire_map).map(|pts| (*a, *b, *ri, pts))
+            });
+            let Some((a, b, ri, pts)) = chosen else {
+                failure = Some(match (too_long, no_hole, cands.is_empty()) {
+                    (Some(d), _, true) => format!("jumper too long ({d} > {})", opts.max_jumper_len.unwrap_or(0)),
+                    (_, _, false) => "every jumper route would cross another wire (allow wire crossings to join it)".to_string(),
+                    _ => "no free hole in the strip".to_string(),
                 });
                 break;
             };
@@ -616,7 +785,7 @@ fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[S
                     col
                 }
             });
-            let pts = jumper_pts(a, b, &opts.jumper_style, &obstacles);
+            wire_map.add(&pts);
             let id = ids.fresh("j");
             c.wires.push(Wire { id: id.clone(), view: View::Breadboard, pts, color: Some(colour.clone()) });
             acc.wires_added.push(id);
@@ -633,5 +802,73 @@ fn jumpers(c: &mut Circuit, lib: &dyn PartLookup, opts: &RouteOptions, nets: &[S
             }
             Some(reason) => acc.failures.push(RouteFailure { net: net.display(), reason }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn segments_touch_when_they_cross_meet_or_overlap() {
+        assert!(seg_touch([0, 0], [4, 4], [0, 4], [4, 0]), "proper crossing");
+        assert!(seg_touch([0, 0], [4, 0], [4, 0], [4, 4]), "shared end");
+        assert!(seg_touch([0, 0], [4, 0], [2, 0], [6, 0]), "collinear overlap");
+        assert!(seg_touch([0, 0], [4, 0], [2, -2], [2, 0]), "end on the interior");
+        assert!(!seg_touch([0, 0], [4, 0], [5, 0], [8, 0]), "collinear gap");
+        assert!(!seg_touch([0, 0], [4, 0], [0, 1], [4, 1]), "parallel");
+        assert!(!seg_touch([0, 0], [4, 4], [3, 0], [4, 1]), "apart");
+    }
+
+    fn map(wires: &[&[Pt]]) -> WireMap {
+        let mut m = WireMap::default();
+        for w in wires {
+            m.add(w);
+        }
+        m
+    }
+
+    #[test]
+    fn a_wire_ending_on_the_jumper_end_is_exempt_but_a_bend_there_is_not() {
+        let a = [0, 0];
+        let b = [10, 0];
+        let ends = [a, b];
+        // A leg that ends at `b` is the same junction, not a crossing.
+        assert!(!blocked(a, b, &map(&[&[b, [10, 5]]]), ends));
+        // The same point as a bend of another wire (which then overlaps it) is a collision.
+        assert!(blocked(a, b, &map(&[&[[10, 6], [10, 0], [14, 0]]]), ends));
+        assert!(blocked(a, b, &map(&[&[[5, -3], [5, 3]]]), ends));
+    }
+
+    #[test]
+    fn detour_goes_around_a_wall_and_never_touches_it() {
+        // A long vertical wire stands between the ends.
+        let wall = map(&[&[[5, -6], [5, 6]]]);
+        let (a, b) = ([0, 0], [10, 0]);
+        let path = detour(a, b, &[], &wall).expect("a way around exists");
+        assert_eq!((path[0], *path.last().unwrap()), (a, b));
+        assert!(!path_crosses(&path, &wall, [a, b]), "{path:?}");
+        assert!(path.len() > 2, "not a straight line: {path:?}");
+        // Orthogonal steps only.
+        assert!(path.windows(2).all(|w| w[0][0] == w[1][0] || w[0][1] == w[1][1]), "{path:?}");
+    }
+
+    #[test]
+    fn detour_gives_up_when_walled_in() {
+        // The target sits inside a closed box of wires.
+        let (a, b) = ([0, 0], [20, 0]);
+        let ring = map(&[&[[18, -2], [22, -2], [22, 2], [18, 2], [18, -2]]]);
+        assert!(detour(a, b, &[], &ring).is_none());
+    }
+
+    #[test]
+    fn jumper_path_respects_the_crossing_switch() {
+        let wall = map(&[&[[5, -6], [5, 6]]]);
+        let (a, b) = ([0, 0], [10, 0]);
+        let mut o = RouteOptions { jumper_style: JumperStyle::Straight, allow_crossings: true, ..RouteOptions::default() };
+        assert_eq!(jumper_path(a, b, &o, &[], &wall), Some(vec![a, b]), "crossings allowed: the style's shape");
+        o.allow_crossings = false;
+        let p = jumper_path(a, b, &o, &[], &wall).unwrap();
+        assert!(p.len() > 2 && !path_crosses(&p, &wall, [a, b]), "{p:?}");
     }
 }

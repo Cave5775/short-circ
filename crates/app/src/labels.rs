@@ -93,7 +93,72 @@ pub fn wire_label_spot(pts: &[Pt]) -> Option<([f64; 2], bool)> {
 
 pub(crate) fn paint_text(d: &DrawCtx, at: Pos2, align: Align2, text: &str, size_units: f64, color: Color32) {
     let Some(px) = text_px(size_units, d.cam.scale) else { return };
-    d.painter.text(at, align, text, FontId::proportional(px), color);
+    paint_legible(d.painter, at, align, text, px, color, d.theme.bg);
+}
+
+/// WCAG relative luminance of an opaque colour, 0 (black) to 1 (white).
+pub fn luminance(c: Color32) -> f32 {
+    let lin = |v: u8| {
+        let s = v as f32 / 255.0;
+        if s <= 0.039_28 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+}
+
+/// WCAG contrast ratio between two colours, 1 (identical) to 21 (black on white).
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// Minimum contrast text keeps against the background before its colour is corrected.
+pub const MIN_CONTRAST: f32 = 3.5;
+
+/// `color`, pushed towards black or white (whichever the background is farther from) just far
+/// enough to reach `MIN_CONTRAST` against `bg`. Colours that already read are returned as is, so a
+/// deliberate palette survives; only the hue-lost-in-the-background case is corrected.
+pub fn legible_on(color: Color32, bg: Color32) -> Color32 {
+    if contrast(color, bg) >= MIN_CONTRAST {
+        return color;
+    }
+    let target = if luminance(bg) > 0.4 { Color32::BLACK } else { Color32::WHITE };
+    for step in 1..=10 {
+        let t = step as f32 / 10.0;
+        let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+        let c = Color32::from_rgb(mix(color.r(), target.r()), mix(color.g(), target.g()), mix(color.b(), target.b()));
+        if contrast(c, bg) >= MIN_CONTRAST {
+            return c;
+        }
+    }
+    target
+}
+
+/// Outline colour for `text`: the opposite end of the lightness scale, mostly opaque.
+pub fn halo_for(text: Color32) -> Color32 {
+    if luminance(text) > 0.4 {
+        Color32::from_rgba_unmultiplied(0, 0, 0, 190)
+    } else {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 190)
+    }
+}
+
+/// Draw `text` so it stays readable on whatever is under it: the colour is corrected against the
+/// canvas background `bg` and a thin halo of the opposite lightness keeps it apart from part fills
+/// and breadboard artwork of a similar colour.
+pub(crate) fn paint_legible(painter: &eframe::egui::Painter, at: Pos2, align: Align2, text: &str, px: f32, color: Color32, bg: Color32) {
+    let color = legible_on(color, bg);
+    let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(px), Color32::PLACEHOLDER);
+    let origin = align.anchor_size(at, galley.size()).min;
+    let r = (px * 0.07).clamp(0.8, 1.6);
+    let halo = halo_for(color);
+    for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7), (0.7, 0.7)] {
+        painter.galley(origin + eframe::egui::vec2(dx * r, dy * r), galley.clone(), halo);
+    }
+    painter.galley(origin, galley, color);
 }
 
 /// Paint wire ids and pin names of `view` when enabled. Cheap when both are off.
@@ -154,6 +219,38 @@ mod tests {
         assert!(text_px(0.75, 240.0).is_some());
         // Exactly at the limit is shown.
         assert_eq!(text_px(1.0, MIN_TEXT_PX), Some(MIN_TEXT_PX));
+    }
+
+    #[test]
+    fn contrast_ratio_matches_wcag() {
+        assert!((contrast(Color32::BLACK, Color32::WHITE) - 21.0).abs() < 0.01);
+        assert!((contrast(Color32::WHITE, Color32::WHITE) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn similar_colour_is_pushed_apart_and_good_colour_is_kept() {
+        let dark_bg = Color32::from_rgb(24, 26, 30);
+        let light_bg = Color32::from_rgb(250, 250, 247);
+        // Dark blue on a dark background and pale yellow on a light one are unreadable.
+        for (c, bg) in [(Color32::from_rgb(30, 40, 90), dark_bg), (Color32::from_rgb(240, 235, 160), light_bg)] {
+            assert!(contrast(c, bg) < MIN_CONTRAST);
+            let fixed = legible_on(c, bg);
+            assert!(contrast(fixed, bg) >= MIN_CONTRAST, "{c:?} on {bg:?} -> {fixed:?}");
+        }
+        // Colours that already read are untouched (a deliberate palette survives).
+        let green = Color32::from_rgb(86, 200, 120);
+        assert_eq!(legible_on(green, dark_bg), green);
+        // Same colour as the background: moved to the far side, just far enough to read.
+        let up = legible_on(dark_bg, dark_bg);
+        assert!(contrast(up, dark_bg) >= MIN_CONTRAST && luminance(up) > luminance(dark_bg));
+        let down = legible_on(light_bg, light_bg);
+        assert!(contrast(down, light_bg) >= MIN_CONTRAST && luminance(down) < luminance(light_bg));
+    }
+
+    #[test]
+    fn halo_is_opposite_of_the_text() {
+        assert_eq!(halo_for(Color32::WHITE).to_srgba_unmultiplied()[..3], [0, 0, 0]);
+        assert_eq!(halo_for(Color32::BLACK).to_srgba_unmultiplied()[..3], [255, 255, 255]);
     }
 
     #[test]

@@ -725,6 +725,8 @@ fn jumper_styles_end_on_holes_and_are_valid() {
             let c = stress(8, 10, seed);
             let mut o = declared(View::Breadboard);
             o.jumper_style = style.clone();
+            // The shapes of the styles; detours around other wires are tested separately.
+            o.allow_crossings = true;
             let out = checked(&c, &o);
             let lib = Library::load(&out.circuit, None);
             let nl = Netlist::build(&out.circuit, &lib, View::Breadboard);
@@ -760,6 +762,79 @@ fn jumper_colours() {
     let cols: std::collections::BTreeSet<_> = out.circuit.wires.iter().filter_map(|w| w.color.clone()).collect();
     assert!(cols.len() >= 2 || out.wires_added.len() < 2, "{cols:?}");
     assert_eq!(out.circuit.wires.first().and_then(|w| w.color.as_deref()), Some("red"));
+}
+
+/// Pairs of breadboard wires of `c` that touch or cross anywhere except at a shared end point.
+fn crossing_jumpers(c: &Circuit) -> Vec<(String, String)> {
+    fn orient(a: crate::model::Pt, b: crate::model::Pt, p: crate::model::Pt) -> i64 {
+        ((b[0] - a[0]) as i64 * (p[1] - a[1]) as i64 - (b[1] - a[1]) as i64 * (p[0] - a[0]) as i64).signum()
+    }
+    let wires: Vec<&crate::model::Wire> = c.wires_in(View::Breadboard).collect();
+    let mut out = Vec::new();
+    for (i, w) in wires.iter().enumerate() {
+        for v in &wires[i + 1..] {
+            let hit = w.pts.windows(2).any(|s| {
+                v.pts.windows(2).any(|t| {
+                    let (d1, d2) = (orient(t[0], t[1], s[0]) * orient(t[0], t[1], s[1]), orient(s[0], s[1], t[0]) * orient(s[0], s[1], t[1]));
+                    let proper = d1 < 0 && d2 < 0;
+                    let on = |a: crate::model::Pt, b: crate::model::Pt, p: crate::model::Pt| {
+                        orient(a, b, p) == 0
+                            && p[0] >= a[0].min(b[0])
+                            && p[0] <= a[0].max(b[0])
+                            && p[1] >= a[1].min(b[1])
+                            && p[1] <= a[1].max(b[1])
+                    };
+                    let touch = [(t[0], s), (t[1], s)].iter().any(|(p, s)| on(s[0], s[1], *p) && ![s[0], s[1]].contains(p))
+                        || [(s[0], t), (s[1], t)].iter().any(|(p, t)| on(t[0], t[1], *p) && ![t[0], t[1]].contains(p));
+                    proper || touch
+                })
+            });
+            if hit {
+                out.push((w.id.clone(), v.id.clone()));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn breadboard_jumpers_cross_only_when_allowed() {
+    let mut crossed_when_allowed = 0;
+    for seed in 1..=6u64 {
+        let c = stress(10, 14, seed);
+        for style in [JumperStyle::Straight, JumperStyle::Orthogonal, JumperStyle::Diagonal45] {
+            let mut o = declared(View::Breadboard);
+            o.jumper_style = style.clone();
+            assert!(!o.allow_crossings, "off by default");
+            let out = checked(&c, &o);
+            let wires: Vec<_> = out.circuit.wires_in(View::Breadboard).map(|w| (w.id.clone(), w.pts.clone())).collect();
+            assert_eq!(crossing_jumpers(&out.circuit), vec![], "seed {seed} {style:?}: jumpers cross; failures {:?}; {wires:?}", out.failures);
+            o.allow_crossings = true;
+            let free = checked(&c, &o);
+            crossed_when_allowed += crossing_jumpers(&free.circuit).len();
+            // Allowing crossings never routes fewer nets.
+            assert!(free.routed >= out.routed, "seed {seed} {style:?}: {} vs {}", free.routed, out.routed);
+        }
+    }
+    assert!(crossed_when_allowed > 0, "the stress circuits never cross, so the test proves nothing");
+}
+
+#[test]
+fn a_jumper_that_cannot_avoid_the_wires_is_reported_not_drawn_across() {
+    let mut c = led_declared();
+    c.parts.push(crate::model::Part {
+        id: "BB1".into(),
+        ty: "breadboard_mini".into(),
+        breadboard: Some(crate::model::Placement::at(0, 0)),
+        ..Default::default()
+    });
+    let lib = Library::load(&c, None);
+    // Without crossings every outcome is crossing-free; whatever could not be joined is listed.
+    let out = port(&c, &lib, &declared(View::Breadboard));
+    assert_eq!(crossing_jumpers(&out.circuit), vec![]);
+    for f in &out.failures {
+        assert!(!f.reason.is_empty());
+    }
 }
 
 #[test]

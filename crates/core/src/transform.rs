@@ -4,7 +4,7 @@ use crate::model::{PinPos, Placement, Pt, ViewDef};
 
 /// Local point -> world point for a placed part: at + R(mirror(p)).
 pub fn to_world(pl: &Placement, p: [f64; 2]) -> [f64; 2] {
-    let (mut x, mut y) = (p[0], p[1]);
+    let (mut x, y) = (p[0], p[1]);
     if pl.mirror {
         x = -x;
     }

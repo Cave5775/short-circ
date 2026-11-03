@@ -16,6 +16,7 @@ pub mod place;
 pub mod props;
 pub mod refs;
 pub mod select;
+pub mod vertex;
 pub mod wire;
 
 #[cfg(test)]
@@ -346,7 +347,7 @@ impl EditorState {
     pub fn hint(&self, view: View) -> &'static str {
         match self.tool {
             Tool::Select => {
-                "click: select   shift+click: add   drag: move / marquee   Del: delete   R: rotate   M: mirror   arrows: nudge   W: wire   Ctrl+Z/Y: undo/redo"
+                "click: select   shift+click: add   drag: move / marquee   drag a wire end or bend: move just that point   + dot or Alt+click on a wire: add a bend   double-click a bend: remove it   Del: delete   R: rotate   M: mirror   W: wire   Ctrl+Z/Y: undo/redo"
             }
             Tool::Wire => match view {
                 View::Schematic => {

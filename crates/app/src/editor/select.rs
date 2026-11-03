@@ -1,6 +1,7 @@
 //! The Select tool: click, shift-click, marquee, drag-move, nudge, delete, rotate, mirror, tidy.
 
 use super::hit;
+use super::vertex;
 use super::{EditCtx, Effect, EditorState, Item, Mods, Selection};
 use short_circ_core::edit::Edit;
 use short_circ_core::{Pt, View};
@@ -31,6 +32,16 @@ pub enum Drag {
         /// On a click without movement, shrink the selection to this item.
         pending: Option<Item>,
     },
+    /// Dragging one point of one wire; the rest of the wire stays where it is.
+    Vertex {
+        id: String,
+        /// Points when the gesture began (the drag is always recomputed from these).
+        before: Vec<Pt>,
+        /// Points the drag moves: `before`, or `before` plus the bend a handle just added.
+        orig: Vec<Pt>,
+        index: usize,
+        touched: bool,
+    },
 }
 
 impl Drag {
@@ -51,7 +62,7 @@ pub fn drag_active(st: &EditorState) -> bool {
 /// Abort a drag: a move is taken back completely, a marquee just disappears.
 pub fn cancel_drag(st: &mut EditorState, ctx: &mut EditCtx) {
     match std::mem::take(&mut st.drag) {
-        Drag::Move { touched, .. } => {
+        Drag::Move { touched, .. } | Drag::Vertex { touched, .. } => {
             ctx.history.end_group();
             if touched {
                 ctx.history.undo(ctx.circuit);
@@ -62,8 +73,76 @@ pub fn cancel_drag(st: &mut EditorState, ctx: &mut EditCtx) {
     }
 }
 
+/// Grab radius (grid units) of a wire point or bend handle.
+fn handle_tol(ctx: &EditCtx) -> f64 {
+    ctx.tol.pin.max(0.35)
+}
+
+fn wire_pts(ctx: &EditCtx, id: &str) -> Option<Vec<Pt>> {
+    ctx.circuit.wires.iter().find(|w| w.id == id && w.view == ctx.view).map(|w| w.pts.clone())
+}
+
+fn start_vertex_drag(st: &mut EditorState, id: String, before: Vec<Pt>, orig: Vec<Pt>, index: usize, touched: bool) {
+    st.drag = Drag::Vertex { id, before, orig, index, touched };
+}
+
+/// A press on a wire point or bend handle starts a one-point drag instead of moving the whole
+/// wire. Returns whether it did. Priority: the points and "+" handles of the selected wire, then
+/// the points of whatever wire is under the pointer; Alt+press on a wire adds a bend there.
+fn begin_vertex_drag(st: &mut EditorState, ctx: &mut EditCtx, pos: [f64; 2], mods: Mods, fx: &mut Vec<Effect>) -> bool {
+    let tol = handle_tol(ctx);
+    // The selected wire's own handles come first (its ends may sit on pins).
+    if let Some(Item::Wire(id)) = st.sel.single().cloned() {
+        if let Some(pts) = wire_pts(ctx, &id) {
+            if let Some(index) = vertex::vertex_at(&pts, pos, tol) {
+                ctx.history.begin_group();
+                start_vertex_drag(st, id, pts.clone(), pts, index, false);
+                fx.push(Effect::Repaint);
+                return true;
+            }
+            if let Some((seg, at)) = vertex::bend_handle_at(&pts, pos, tol) {
+                return insert_bend(st, ctx, id, pts, seg, at, fx);
+            }
+        }
+    }
+    let Some(Item::Wire(id)) = hit::hit_item(ctx.circuit, ctx.lib, ctx.view, pos, ctx.tol) else { return false };
+    let Some(pts) = wire_pts(ctx, &id) else { return false };
+    if let Some(index) = vertex::vertex_at(&pts, pos, tol) {
+        st.sel.set(Item::Wire(id.clone()));
+        ctx.history.begin_group();
+        start_vertex_drag(st, id, pts.clone(), pts, index, false);
+        fx.extend([Effect::SelectionChanged, Effect::Repaint]);
+        return true;
+    }
+    if mods.alt {
+        if let Some((seg, at)) = vertex::bend_near(&pts, pos) {
+            st.sel.set(Item::Wire(id.clone()));
+            fx.push(Effect::SelectionChanged);
+            return insert_bend(st, ctx, id, pts, seg, at, fx);
+        }
+    }
+    false
+}
+
+/// Add a bend after segment `seg` and keep dragging it.
+fn insert_bend(st: &mut EditorState, ctx: &mut EditCtx, id: String, before: Vec<Pt>, seg: usize, at: Pt, fx: &mut Vec<Effect>) -> bool {
+    let bent = vertex::with_bend(&before, seg, at);
+    ctx.history.begin_group();
+    if let Err(e) = ctx.apply(Edit::SetWirePts { id: id.clone(), pts: bent.clone() }) {
+        ctx.history.end_group();
+        fx.push(Effect::Refused(e.to_string()));
+        return true;
+    }
+    start_vertex_drag(st, id, before, bent, seg + 1, true);
+    fx.extend([Effect::CircuitChanged, Effect::Repaint]);
+    true
+}
+
 pub fn pointer_down(st: &mut EditorState, ctx: &mut EditCtx, pos: [f64; 2], mods: Mods, fx: &mut Vec<Effect>) {
     cancel_drag(st, ctx);
+    if !mods.shift && begin_vertex_drag(st, ctx, pos, mods, fx) {
+        return;
+    }
     match hit::hit_item(ctx.circuit, ctx.lib, ctx.view, pos, ctx.tol) {
         Some(item) => {
             if mods.shift {
@@ -107,6 +186,19 @@ pub fn pointer_move(st: &mut EditorState, ctx: &mut EditCtx, pos: [f64; 2], fx: 
             }
             fx.push(Effect::Repaint);
         }
+        Drag::Vertex { id, orig, index, touched, .. } => {
+            let next = vertex::moved(orig, *index, super::snap(pos), ctx.view);
+            if wire_pts(ctx, id).is_some_and(|now| now != next) {
+                match ctx.apply(Edit::SetWirePts { id: id.clone(), pts: next }) {
+                    Ok(()) => {
+                        *touched = true;
+                        fx.push(Effect::CircuitChanged);
+                    }
+                    Err(e) => fx.push(Effect::Refused(e.to_string())),
+                }
+            }
+            fx.push(Effect::Repaint);
+        }
         Drag::Marquee { cur, .. } => {
             *cur = pos;
             fx.push(Effect::Repaint);
@@ -131,6 +223,16 @@ pub fn pointer_up(st: &mut EditorState, ctx: &mut EditCtx, pos: [f64; 2], fx: &m
                     fx.push(Effect::SelectionChanged);
                 }
             }
+        }
+        Drag::Vertex { id, before, touched, .. } => {
+            ctx.history.end_group();
+            // Dragged away and back (and no bend added): leave no undo step behind.
+            if touched && wire_pts(ctx, &id).is_some_and(|now| now == before) {
+                ctx.history.undo(ctx.circuit);
+                st.sel.prune(ctx.circuit);
+                fx.push(Effect::CircuitChanged);
+            }
+            fx.push(Effect::Repaint);
         }
         Drag::Marquee { start, shift, base, board, .. } => {
             let (dx, dy) = ((pos[0] - start[0]).abs(), (pos[1] - start[1]).abs());
@@ -163,6 +265,19 @@ pub fn pointer_up(st: &mut EditorState, ctx: &mut EditCtx, pos: [f64; 2], fx: &m
 }
 
 pub fn double_click(st: &mut EditorState, ctx: &mut EditCtx, pos: [f64; 2], fx: &mut Vec<Effect>) {
+    // A double click on a bend of the selected wire takes the bend out again.
+    if let Some(Item::Wire(id)) = st.sel.single().cloned() {
+        if let Some(pts) = wire_pts(ctx, &id) {
+            let removed = vertex::vertex_at(&pts, pos, handle_tol(ctx)).and_then(|i| vertex::without_bend(&pts, i));
+            if let Some(pts) = removed {
+                match ctx.apply(Edit::SetWirePts { id, pts }) {
+                    Ok(()) => fx.extend([Effect::CircuitChanged, Effect::Repaint, Effect::Status("Removed the bend".into())]),
+                    Err(e) => fx.push(Effect::Refused(e.to_string())),
+                }
+                return;
+            }
+        }
+    }
     if let Some(item) = hit::hit_item(ctx.circuit, ctx.lib, ctx.view, pos, ctx.tol) {
         if !st.sel.contains(&item) {
             st.sel.set(item);
