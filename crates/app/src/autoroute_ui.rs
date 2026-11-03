@@ -451,12 +451,22 @@ impl AutorouteUi {
             return None;
         }
         let mut applied = self.poll();
+        if self.arrived.is_some() {
+            // The window grows by the result panel one frame later; make sure that frame happens.
+            ctx.request_repaint();
+        }
         let before = self.opts.clone();
         let mut open = true;
         let mut want = Want::None;
-        egui::Window::new("Autoroute").open(&mut open).collapsible(false).default_width(440.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, true]).max_height(ctx.content_rect().height() - 90.0).show(ui, |ui| match env {
-                Some(env) => want = self.body(ui, env),
+        egui::Window::new("Autoroute")
+            .open(&mut open)
+            .collapsible(false)
+            .default_pos([16.0, 96.0])
+            .show(ctx, |ui| match env {
+                Some(env) => {
+                    ui.set_min_width(420.0);
+                    want = self.body(ui, env)
+                }
                 None => {
                     ui.label("No circuit is open.");
                     if ui.button("Close").clicked() {
@@ -464,7 +474,6 @@ impl AutorouteUi {
                     }
                 }
             });
-        });
         if self.opts != before {
             self.invalidate();
         }
