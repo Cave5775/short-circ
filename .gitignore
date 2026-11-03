@@ -1,3 +1,4 @@
 /target
 *.svg.out
-.claude/
+.claude/worktrees/
+.claude/settings.local.json

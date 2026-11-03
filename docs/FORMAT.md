@@ -272,7 +272,7 @@ Views: `--view schematic|breadboard` where noted; omitted means the default stat
 - `short-circ.exe --list-parts` prints resolvable component types with the views each has
 - `short-circ.exe --list-colors` prints the preset colour names with their hex codes
 - In the GUI, File > Import Fritzing part... does the same for one file and writes into `parts/` next to the open circuit (or the executable).
-The GUI never requires any of these tools, and nothing in this repo refers to Claude except this README paragraph about the optional skill, which is published with each release rather than stored here.
+The GUI never requires any of these tools, and nothing in this repo outside `.claude/` refers to Claude.
 
 ## Compatibility
 `short-circ/1` files load through one upgrade function (`migrate`) and nothing else in the program knows about v1:

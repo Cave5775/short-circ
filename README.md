@@ -217,12 +217,13 @@ crates/app/                   the viewer, editor and command-line front end (egu
 parts/                        built-in component definitions (.part), embedded in the executable
 examples/                     sample circuits (.circ)
 docs/FORMAT.md                file format specification
-scripts/sync-skill.ps1        refreshes the format copy inside the optional Claude Code skill
+.claude/skills/circuit/       optional Claude Code skill
+.claude/CHANGELOG.md          release notes
 ```
 
 ## Optional: Claude Code skill
 
-A skill lets [Claude Code](https://claude.com/claude-code) write, autoroute, validate and render `.circ` and `.part` files using the command-line tool. It is optional and the app never depends on it. The skill is not stored in this repository (`.claude/` is ignored); it is published with each release so that it matches that release's features. If you keep a copy at `.claude/skills/circuit/SKILL.md`, `powershell -File scripts\sync-skill.ps1` refreshes the specification copy inside it from `docs/FORMAT.md`.
+`.claude/skills/circuit/` contains a skill that lets [Claude Code](https://claude.com/claude-code) write, autoroute, validate and render `.circ` and `.part` files using the command-line tool. It is optional. The app never depends on it. It is updated with each release so that it matches that release's features (see `.claude/CHANGELOG.md`). After editing `docs/FORMAT.md`, run `powershell -File scripts\sync-skill.ps1` to refresh the specification copy inside the skill.
 
 ## Roadmap
 
