@@ -3,6 +3,8 @@
 
 use crate::canvas::{self, Camera, DrawCtx, Highlight, Theme};
 use crate::core_api::{self, Nets};
+use crate::edit_ui::{self, EditUi};
+use crate::editor::{self, doc, EditCtx};
 use crate::labels::LabelOpts;
 use crate::nets_panel::{self, NetKey};
 use crate::partbrowser::PartBrowser;
@@ -12,6 +14,7 @@ use crate::{breadboard, reload, window};
 use eframe::egui::{self, Color32, PointerButton, RichText, Sense, Vec2};
 use short_circ_core::color::Rgba;
 use short_circ_core::transform::pin_world;
+use short_circ_core::edit::History;
 use short_circ_core::{fzp, view_in_use, Circuit, Issue, Library, Pt, Report, Severity, View};
 use std::path::{Path, PathBuf};
 
@@ -51,10 +54,15 @@ fn view_title(view: View) -> &'static str {
     }
 }
 
-struct Loaded {
+pub(crate) struct Loaded {
     circuit: Circuit,
     lib: Library,
-    path: PathBuf,
+    /// `None` for a new circuit that was never saved.
+    path: Option<PathBuf>,
+    /// Undo history and dirty tracking (Edit mode).
+    history: History,
+    /// Types that did not resolve at the last library rebuild (avoids rebuilding per edit).
+    unresolved: Vec<String>,
     /// Nets of each view, indexed by [`vi`].
     nets: [Nets; 2],
     report: Report,
@@ -69,6 +77,48 @@ struct Loaded {
 impl Loaded {
     fn nets(&self, view: View) -> &Nets {
         &self.nets[vi(view)]
+    }
+
+    /// A new, empty, unsaved circuit.
+    fn untitled() -> Loaded {
+        let circuit = doc::new_circuit();
+        let lib = Library::load(&circuit, None);
+        let mut l = Loaded {
+            circuit,
+            lib,
+            path: None,
+            history: History::new(),
+            unresolved: Vec::new(),
+            nets: Default::default(),
+            report: Report::from_issues(Vec::new()),
+            junctions: Vec::new(),
+            jumpers: Vec::new(),
+            stamp: reload::Stamp::default(),
+        };
+        l.history.clear();
+        l.history.mark_clean();
+        l.analyse();
+        l
+    }
+
+    fn dirty(&self) -> bool {
+        self.history.dirty()
+    }
+
+    fn dir(&self) -> Option<&Path> {
+        self.path.as_deref().and_then(|p| p.parent())
+    }
+
+    /// After the circuit was edited: resolve types that only became known now (generated
+    /// families, parts folder) and recompute everything derived, as the load path does.
+    fn after_edit(&mut self) {
+        let missing: Vec<String> =
+            self.circuit.parts.iter().filter(|p| self.lib.get(&p.ty).is_none()).map(|p| p.ty.clone()).collect();
+        if !missing.is_empty() && missing != self.unresolved {
+            self.lib = Library::load(&self.circuit, self.path.as_deref().and_then(|p| p.parent()));
+            self.unresolved = self.circuit.parts.iter().filter(|p| self.lib.get(&p.ty).is_none()).map(|p| p.ty.clone()).collect();
+        }
+        self.analyse();
     }
 
     /// Recompute everything derived from the circuit and the library.
@@ -107,6 +157,26 @@ enum Action {
     FitView,
     ReloadNow,
     ImportFritzing,
+    New,
+    Save,
+    SaveAs,
+    Quit,
+    ToggleEdit,
+    Edit(editor::Command),
+    Place(String),
+    /// Reload the file from disk, dropping unsaved edits (the "changed on disk" banner).
+    ReloadDiscard,
+    KeepMine,
+}
+
+/// What to do once unsaved changes have been dealt with (saved or discarded).
+#[derive(Clone)]
+enum Then {
+    OpenDialog,
+    Open(PathBuf),
+    New,
+    Reload,
+    Close,
 }
 
 pub struct ShortCircApp {
@@ -139,20 +209,46 @@ pub struct ShortCircApp {
     tex: TexCache,
     show_help: bool,
     window_placed: bool,
+    /// Edit mode (View mode is the default and stays read-only).
+    edit_mode: bool,
+    edit: EditUi,
+    /// Unsaved changes: waiting for Save / Discard / Cancel before doing this.
+    confirm: Option<Then>,
+    /// The window may close (confirmed or nothing to lose).
+    allow_close: bool,
+    /// The file changed on disk while there are unsaved edits.
+    disk_changed: bool,
+    last_title: String,
+    /// The last status message is a refusal (shown in red).
+    status_warn: bool,
 }
 
 const STATUS_SECS: f32 = 3.0;
-const HINT: &str = "drag: pan   wheel: zoom   click pin/wire: lock net   Esc: clear   F: fit   G: grid   1/2: schematic/breadboard   R: reload   Ctrl+O: open";
+const HINT: &str = "drag: pan   wheel: zoom   click pin/wire: lock net   Esc: clear   F: fit   G: grid   1/2: schematic/breadboard   R / F5: reload   Ctrl+E: edit   Ctrl+O: open";
 const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+O", "open a circuit file"),
+    ("Ctrl+N", "new circuit (Edit mode)"),
+    ("Ctrl+S / Ctrl+Shift+S", "save / save as"),
+    ("Ctrl+E", "switch between View mode and Edit mode"),
     ("1 / 2", "show the schematic / the breadboard view"),
     ("F", "fit the view to the window"),
-    ("R", "reload the file now"),
+    ("F5", "reload the file now (both modes)"),
+    ("R", "reload the file now (View mode only; in Edit mode R rotates)"),
     ("G", "show or hide the grid"),
     ("Esc", "clear the selection and the locked net"),
     ("click pin or wire", "lock that net's highlight"),
     ("click empty space", "clear selection and locked net"),
-    ("drag / wheel", "pan / zoom"),
+    ("drag / wheel", "pan / zoom (Edit mode: pan with the middle button)"),
+    ("Edit: click / shift+click", "select / add to the selection"),
+    ("Edit: drag", "move the selection, or draw a marquee in empty space"),
+    ("Edit: arrows", "nudge the selection by one unit"),
+    ("Edit: Del", "delete the selection"),
+    ("Edit: R / M", "rotate 90 deg clockwise / mirror (also while placing)"),
+    ("Edit: W", "wire tool (Enter / double click ends, Esc cancels, Backspace undoes a vertex)"),
+    ("Edit: L", "label tool (schematic)"),
+    ("Edit: Esc / S", "back to the select tool"),
+    ("Edit: Ctrl+A / C / X / V", "select all / copy / cut / paste"),
+    ("Edit: Ctrl+Z / Ctrl+Y", "undo / redo (Ctrl+Shift+Z redoes too)"),
 ];
 
 /// Read and analyse a circuit file. The file system stamp is taken first so a write that
@@ -164,13 +260,17 @@ fn build_loaded(path: &Path) -> Result<Loaded, String> {
     let mut loaded = Loaded {
         circuit,
         lib,
-        path: path.to_path_buf(),
+        path: Some(path.to_path_buf()),
+        history: History::new(),
+        unresolved: Vec::new(),
         nets: Default::default(),
         report: Report::from_issues(Vec::new()),
         junctions: Vec::new(),
         jumpers: Vec::new(),
         stamp,
     };
+    loaded.history.clear();
+    loaded.history.mark_clean();
     loaded.analyse();
     Ok(loaded)
 }
@@ -224,6 +324,13 @@ impl ShortCircApp {
             tex: TexCache::default(),
             show_help: false,
             window_placed: false,
+            edit_mode: false,
+            edit: EditUi::default(),
+            confirm: None,
+            allow_close: false,
+            disk_changed: false,
+            last_title: String::new(),
+            status_warn: false,
         };
         if let Some(p) = initial {
             app.load_file(&cc.egui_ctx, &p);
@@ -244,8 +351,10 @@ impl ShortCircApp {
                 }
                 self.tex.clear();
                 self.recent.add(path);
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!("short-circ - {name}")));
+                self.edit.editor.reset();
+                self.edit.last_view = self.active;
+                self.disk_changed = false;
+                let _ = ctx;
             }
             Err(msg) => self.error = Some(msg),
         }
@@ -255,7 +364,7 @@ impl ShortCircApp {
     /// each tab. On failure the previous circuit stays and the error banner is shown.
     fn reload_current(&mut self, ctx: &egui::Context) {
         let Some(old) = &self.loaded else { return };
-        let path = old.path.clone();
+        let Some(path) = old.path.clone() else { return };
         let sel_ids: Vec<Option<String>> = self
             .vs
             .iter()
@@ -274,6 +383,8 @@ impl ShortCircApp {
                 self.loaded = Some(new);
                 self.tex.clear();
                 self.error = None;
+                self.disk_changed = false;
+                self.edit.editor.reset();
                 self.reloads += 1;
                 let msg = format!("Reloaded ({})", self.reloads);
                 self.set_status(ctx, msg);
@@ -288,7 +399,261 @@ impl ShortCircApp {
         }
     }
 
+    // ---- documents and Edit mode ----------------------------------------------------------------
+
+    fn dirty(&self) -> bool {
+        self.loaded.as_ref().is_some_and(|l| l.dirty())
+    }
+
+    /// Do `then` now, or after asking what to do with unsaved changes.
+    fn guard(&mut self, then: Then, ctx: &egui::Context) {
+        if self.dirty() {
+            self.confirm = Some(then);
+        } else {
+            self.run_then(then, ctx);
+        }
+    }
+
+    fn run_then(&mut self, then: Then, ctx: &egui::Context) {
+        match then {
+            Then::OpenDialog => {
+                let pick = rfd::FileDialog::new()
+                    .add_filter("short-circ circuit", &["circ"])
+                    .add_filter("All files", &["*"])
+                    .pick_file();
+                if let Some(p) = pick {
+                    self.load_file(ctx, &p);
+                }
+            }
+            Then::Open(p) => self.load_file(ctx, &p),
+            Then::New => self.new_document(ctx),
+            Then::Reload => self.reload_current(ctx),
+            Then::Close => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// File > New: an empty, untitled circuit in the current format, in Edit mode.
+    fn new_document(&mut self, ctx: &egui::Context) {
+        self.loaded = Some(Loaded::untitled());
+        self.active = View::Schematic;
+        self.vs = Default::default();
+        for st in &mut self.vs {
+            st.pending_fit = true;
+        }
+        self.tex.clear();
+        self.error = None;
+        self.disk_changed = false;
+        self.edit.editor.reset();
+        self.edit.last_view = self.active;
+        self.edit_mode = true;
+        self.set_status(ctx, "New circuit".into());
+    }
+
+    fn save(&mut self, ctx: &egui::Context) -> bool {
+        match self.loaded.as_ref().map(|l| l.path.clone()) {
+            Some(Some(p)) => self.write_to(ctx, p),
+            Some(None) => self.save_as(ctx),
+            None => false,
+        }
+    }
+
+    fn save_as(&mut self, ctx: &egui::Context) -> bool {
+        let Some(l) = &self.loaded else { return false };
+        let name = l.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "untitled.circ".into());
+        let mut dlg = rfd::FileDialog::new().add_filter("short-circ circuit", &["circ"]).set_file_name(name);
+        if let Some(d) = l.dir() {
+            dlg = dlg.set_directory(d);
+        }
+        let Some(mut p) = dlg.save_file() else { return false };
+        if p.extension().is_none() {
+            p.set_extension("circ");
+        }
+        self.write_to(ctx, p)
+    }
+
+    /// Write the circuit canonically; on success the document is clean and the poll stamp is
+    /// refreshed so our own write does not look like an external change.
+    fn write_to(&mut self, ctx: &egui::Context, path: PathBuf) -> bool {
+        let Some(l) = &mut self.loaded else { return false };
+        if let Err(e) = doc::save_circuit(&path, &l.circuit) {
+            self.error = Some(e);
+            return false;
+        }
+        let dir_changed = l.dir() != path.parent();
+        l.path = Some(path.clone());
+        l.history.mark_clean();
+        l.stamp = reload::stamp(&path);
+        if dir_changed {
+            l.lib = Library::load(&l.circuit, path.parent());
+            l.analyse();
+        }
+        self.recent.add(&path);
+        self.disk_changed = false;
+        self.set_status(ctx, format!("Saved {}", doc::display_name(Some(&path))));
+        true
+    }
+
+    fn set_edit_mode(&mut self, ctx: &egui::Context, on: bool) {
+        if on == self.edit_mode {
+            return;
+        }
+        if on && self.loaded.is_none() {
+            self.new_document(ctx);
+            return;
+        }
+        if !on {
+            let view = self.active;
+            if let Some(l) = &mut self.loaded {
+                let mut e = EditCtx::new(&mut l.circuit, &mut l.history, &l.lib, view);
+                self.edit.editor.cancel_all(&mut e);
+                l.after_edit();
+            }
+        }
+        self.edit_mode = on;
+        self.edit.last_view = self.active;
+    }
+
+    /// Feed one event to the editor and carry out what it asks for.
+    fn edit_event(&mut self, ctx: &egui::Context, ev: editor::Event, tol: editor::HitTol) {
+        let view = self.active;
+        let Some(l) = &mut self.loaded else { return };
+        let mut e = EditCtx::new(&mut l.circuit, &mut l.history, &l.lib, view);
+        e.tol = tol;
+        let fx = self.edit.editor.handle(ev, &mut e);
+        self.apply_effects(ctx, fx);
+    }
+
+    fn apply_effects(&mut self, ctx: &egui::Context, fx: Vec<editor::Effect>) {
+        use editor::Effect;
+        let mut changed = false;
+        for f in fx {
+            match f {
+                Effect::CircuitChanged => changed = true,
+                Effect::Status(m) => self.set_status(ctx, m),
+                Effect::Refused(m) => {
+                    self.set_status(ctx, m);
+                    self.status_warn = true;
+                }
+                Effect::Repaint | Effect::SelectionChanged | Effect::ToolChanged => ctx.request_repaint(),
+                Effect::PromptLabel(_) => {
+                    self.edit.label_text.clear();
+                    ctx.request_repaint();
+                }
+                Effect::OpenProperties => self.edit.show_props = true,
+                Effect::ClipboardText(t) => ctx.copy_text(t),
+            }
+        }
+        if changed {
+            if let Some(l) = &mut self.loaded {
+                l.after_edit();
+            }
+        }
+    }
+
+    fn update_title(&mut self, ctx: &egui::Context) {
+        let title = match &self.loaded {
+            Some(l) => doc::window_title(l.path.as_deref(), l.dirty()),
+            None => "short-circ".to_string(),
+        };
+        if title != self.last_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = title;
+        }
+    }
+
+    fn confirm_window(&mut self, ctx: &egui::Context) {
+        enum Choice {
+            Save,
+            Discard,
+            Cancel,
+        }
+        let Some(then) = self.confirm.clone() else { return };
+        let name = doc::display_name(self.loaded.as_ref().and_then(|l| l.path.as_deref()));
+        let mut choice = None;
+        egui::Window::new("Unsaved changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!("{name} has unsaved changes."));
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        choice = Some(Choice::Save);
+                    }
+                    if ui.button("Discard").clicked() {
+                        choice = Some(Choice::Discard);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        choice = Some(Choice::Cancel);
+                    }
+                });
+            });
+        match choice {
+            Some(Choice::Save) => {
+                if self.save(ctx) {
+                    self.confirm = None;
+                    self.run_then(then, ctx);
+                }
+            }
+            Some(Choice::Discard) => {
+                self.confirm = None;
+                self.run_then(then, ctx);
+            }
+            Some(Choice::Cancel) => self.confirm = None,
+            None => {}
+        }
+    }
+
+    /// Banner shown when the file changed on disk while there are unsaved edits.
+    fn disk_banner(&mut self, ui: &mut egui::Ui) {
+        if !self.disk_changed {
+            return;
+        }
+        egui::Panel::top("disk_banner").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("changed on disk").strong().color(Color32::from_rgb(235, 175, 40)));
+                ui.label("The file was modified outside while you have unsaved edits.");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Keep").on_hover_text("keep my edits; saving overwrites the file").clicked() {
+                        self.actions.push(Action::KeepMine);
+                    }
+                    if ui.button("Reload").on_hover_text("discard my edits and load the file").clicked() {
+                        self.actions.push(Action::ReloadDiscard);
+                    }
+                });
+            });
+        });
+    }
+
+    fn edit_tools_panel(&mut self, ui: &mut egui::Ui) {
+        let (can_undo, can_redo) = self.loaded.as_ref().map(|l| (l.history.can_undo(), l.history.can_redo())).unwrap_or((false, false));
+        let view = self.active;
+        let mut evs = Vec::new();
+        egui::Panel::top("edit_tools").show(ui, |ui| evs = self.edit.tools_bar(ui, view, can_undo, can_redo));
+        let ctx = ui.ctx().clone();
+        for ev in evs {
+            self.edit_event(&ctx, ev, Default::default());
+        }
+    }
+
+    fn edit_props_panel(&mut self, ui: &mut egui::Ui) {
+        let view = self.active;
+        let Some(l) = &mut self.loaded else { return };
+        let mut e = EditCtx::new(&mut l.circuit, &mut l.history, &l.lib, view);
+        let out = self.edit.props_panel(ui, &mut e);
+        if out.changed {
+            l.after_edit();
+        }
+        if let Some(m) = out.status {
+            self.set_status(ui.ctx(), m);
+        }
+    }
+
     fn set_status(&mut self, ctx: &egui::Context, msg: String) {
+        self.status_warn = false;
         self.status = Some((msg, ctx.input(|i| i.time)));
         ctx.request_repaint_after(std::time::Duration::from_secs_f32(STATUS_SECS + 0.1));
     }
@@ -296,6 +661,7 @@ impl ShortCircApp {
     /// Poll the file system about every 400 ms and reload when the file or parts folder changed.
     fn poll_reload(&mut self, ctx: &egui::Context) {
         let Some(l) = &self.loaded else { return };
+        let Some(path) = &l.path else { return };
         if !self.auto_reload {
             return;
         }
@@ -305,8 +671,17 @@ impl ShortCircApp {
             return;
         }
         self.last_poll = now;
-        if reload::should_reload(&l.stamp, &reload::stamp(&l.path)) {
-            self.reload_current(ctx);
+        let cur = reload::stamp(path);
+        match reload::decide(l.dirty(), &l.stamp, &cur) {
+            reload::Poll::Idle => {}
+            reload::Poll::Reload => self.reload_current(ctx),
+            reload::Poll::Conflict => {
+                // Reloading is suspended while there are unsaved edits: ask once per change.
+                if let Some(l) = &mut self.loaded {
+                    l.stamp = cur;
+                }
+                self.disk_changed = true;
+            }
         }
     }
 
@@ -320,20 +695,30 @@ impl ShortCircApp {
     fn run_actions(&mut self, ctx: &egui::Context) {
         for a in std::mem::take(&mut self.actions) {
             match a {
-                Action::OpenDialog => {
-                    let pick = rfd::FileDialog::new()
-                        .add_filter("short-circ circuit", &["circ"])
-                        .add_filter("All files", &["*"])
-                        .pick_file();
-                    if let Some(p) = pick {
-                        self.load_file(ctx, &p);
-                    }
-                }
-                Action::Open(p) => self.load_file(ctx, &p),
+                Action::OpenDialog => self.guard(Then::OpenDialog, ctx),
+                Action::Open(p) => self.guard(Then::Open(p), ctx),
+                Action::New => self.guard(Then::New, ctx),
+                Action::ReloadNow => self.guard(Then::Reload, ctx),
+                Action::Quit => self.guard(Then::Close, ctx),
                 Action::FitView => self.vs[vi(self.active)].pending_fit = true,
-                Action::ReloadNow => self.reload_current(ctx),
                 Action::ExportSvg => self.export_svg(),
                 Action::ImportFritzing => self.import_fritzing(),
+                Action::Save => {
+                    self.save(ctx);
+                }
+                Action::SaveAs => {
+                    self.save_as(ctx);
+                }
+                Action::ToggleEdit => self.set_edit_mode(ctx, !self.edit_mode),
+                Action::Edit(cmd) => self.edit_event(ctx, editor::Event::Command(cmd), Default::default()),
+                Action::Place(ty) => {
+                    if !self.edit_mode {
+                        self.set_edit_mode(ctx, true);
+                    }
+                    self.edit_event(ctx, editor::Event::StartPlace { ty }, Default::default());
+                }
+                Action::ReloadDiscard => self.reload_current(ctx),
+                Action::KeepMine => self.disk_changed = false,
             }
         }
     }
@@ -344,7 +729,7 @@ impl ShortCircApp {
         let Some(src) = rfd::FileDialog::new().add_filter("Fritzing part", &["fzpz", "fzp"]).pick_file() else {
             return;
         };
-        let dir = match self.loaded.as_ref().and_then(|l| l.path.parent()) {
+        let dir = match self.loaded.as_ref().and_then(|l| l.dir()) {
             Some(d) => d.join("parts"),
             None => std::env::current_exe()
                 .ok()
@@ -354,7 +739,7 @@ impl ShortCircApp {
         match fzp::import_to_dir(&src, &dir, &fzp::ImportOptions::default()) {
             Ok((part, warnings, out)) => {
                 if let Some(l) = &mut self.loaded {
-                    l.lib = Library::load(&l.circuit, l.path.parent());
+                    l.lib = Library::load(&l.circuit, l.dir());
                     l.analyse();
                 }
                 self.tex.clear();
@@ -398,7 +783,7 @@ impl ShortCircApp {
     fn export_svg(&mut self) {
         let Some(l) = &self.loaded else { return };
         let view = self.active;
-        let stem = l.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "circuit".into());
+        let stem = l.path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "circuit".into());
         let name = match view {
             View::Schematic => format!("{stem}.svg"),
             View::Breadboard => format!("{stem}-breadboard.svg"),
@@ -422,6 +807,30 @@ impl ShortCircApp {
         if open {
             self.actions.push(Action::OpenDialog);
         }
+        // Document shortcuts (Shift+S first: a plain Ctrl+S would match it too).
+        let (new, save_as, save, toggle) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::N),
+                i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::S),
+                i.consume_key(egui::Modifiers::COMMAND, egui::Key::E),
+            )
+        });
+        if new {
+            self.actions.push(Action::New);
+        }
+        if save_as {
+            self.actions.push(Action::SaveAs);
+        } else if save {
+            self.actions.push(Action::Save);
+        }
+        if toggle {
+            self.actions.push(Action::ToggleEdit);
+        }
+        // F5 reloads in both modes.
+        if ctx.input(|i| i.key_pressed(egui::Key::F5)) {
+            self.actions.push(Action::ReloadNow);
+        }
         // Single-key shortcuts are off while a text box has the keyboard.
         if ctx.egui_wants_keyboard_input() {
             return;
@@ -430,7 +839,8 @@ impl ShortCircApp {
         if key(egui::Key::F) {
             self.actions.push(Action::FitView);
         }
-        if key(egui::Key::R) {
+        // R reloads only in View mode: in Edit mode it rotates.
+        if key(egui::Key::R) && !self.edit_mode {
             self.actions.push(Action::ReloadNow);
         }
         if key(egui::Key::G) {
@@ -452,7 +862,10 @@ impl ShortCircApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                if ui.button("Open...").clicked() {
+                if ui.button("New  (Ctrl+N)").clicked() {
+                    self.actions.push(Action::New);
+                }
+                if ui.button("Open...  (Ctrl+O)").clicked() {
                     self.actions.push(Action::OpenDialog);
                 }
                 ui.menu_button("Open Recent", |ui| {
@@ -466,6 +879,14 @@ impl ShortCircApp {
                         }
                     }
                 });
+                let has_doc = self.loaded.is_some();
+                if ui.add_enabled(has_doc, egui::Button::new("Save  (Ctrl+S)")).clicked() {
+                    self.actions.push(Action::Save);
+                }
+                if ui.add_enabled(has_doc, egui::Button::new("Save As...  (Ctrl+Shift+S)")).clicked() {
+                    self.actions.push(Action::SaveAs);
+                }
+                ui.separator();
                 let can_export = self.loaded.is_some() && core_api::svg_available();
                 let export = format!("Export {} SVG...", self.active.key());
                 if ui.add_enabled(can_export, egui::Button::new(export)).clicked() {
@@ -476,9 +897,12 @@ impl ShortCircApp {
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
-                    ui.send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.actions.push(Action::Quit);
                 }
             });
+            if self.edit_mode {
+                self.edit_menu(ui);
+            }
             ui.menu_button("View", |ui| {
                 for v in View::ALL {
                     if ui.radio_value(&mut self.active, v, format!("{} view  ({})", view_title(v), vi(v) + 1)).clicked() {
@@ -489,7 +913,7 @@ impl ShortCircApp {
                 if ui.button("Fit to window  (F)").clicked() {
                     self.actions.push(Action::FitView);
                 }
-                if ui.add_enabled(self.loaded.is_some(), egui::Button::new("Reload now  (R)")).clicked() {
+                if ui.add_enabled(self.loaded.as_ref().is_some_and(|l| l.path.is_some()), egui::Button::new("Reload now  (F5)")).clicked() {
                     self.actions.push(Action::ReloadNow);
                 }
                 ui.checkbox(&mut self.auto_reload, "Auto-reload");
@@ -499,6 +923,9 @@ impl ShortCircApp {
                 ui.checkbox(&mut self.show_issues, "Issues panel");
                 ui.checkbox(&mut self.show_nets, "Nets panel");
                 ui.checkbox(&mut self.browser.open, "Part browser");
+                if self.edit_mode {
+                    ui.checkbox(&mut self.edit.show_props, "Properties panel");
+                }
                 ui.separator();
                 ui.label("Labels");
                 ui.checkbox(&mut self.labels.refs, "Part references");
@@ -514,7 +941,12 @@ impl ShortCircApp {
                     self.show_about = true;
                 }
             });
-            // View tabs.
+            // Mode toggle and view tabs.
+            ui.separator();
+            let label = if self.edit_mode { "Edit mode: on" } else { "Edit mode" };
+            if ui.selectable_label(self.edit_mode, label).on_hover_text("Ctrl+E").clicked() {
+                self.actions.push(Action::ToggleEdit);
+            }
             ui.separator();
             for v in View::ALL {
                 let in_use = self.loaded.as_ref().is_none_or(|l| view_in_use(&l.circuit, v));
@@ -529,6 +961,48 @@ impl ShortCircApp {
                 }
             }
         });
+    }
+
+    fn edit_menu(&mut self, ui: &mut egui::Ui) {
+        let (can_undo, can_redo) = self.loaded.as_ref().map(|l| (l.history.can_undo(), l.history.can_redo())).unwrap_or((false, false));
+        let has_sel = !self.edit.editor.selection().is_empty();
+        let has_clip = self.edit.editor.has_clipboard();
+        let mut picked: Option<String> = None;
+        let mut cmds: Vec<editor::Command> = Vec::new();
+        ui.menu_button("Edit", |ui| {
+            use editor::Command as C;
+            let items = [
+                ("Undo  (Ctrl+Z)", can_undo, C::Undo),
+                ("Redo  (Ctrl+Y)", can_redo, C::Redo),
+                ("Cut  (Ctrl+X)", has_sel, C::Cut),
+                ("Copy  (Ctrl+C)", has_sel, C::Copy),
+                ("Paste  (Ctrl+V)", has_clip, C::Paste),
+                ("Delete  (Del)", has_sel, C::Delete),
+                ("Select all  (Ctrl+A)", true, C::SelectAll),
+                ("Rotate  (R)", has_sel, C::Rotate),
+                ("Mirror  (M)", has_sel, C::Mirror),
+                ("Tidy wires", true, C::Tidy),
+            ];
+            for (k, (text, enabled, cmd)) in items.into_iter().enumerate() {
+                if matches!(k, 2 | 5 | 9) {
+                    ui.separator();
+                }
+                if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
+                    cmds.push(cmd);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            let lib = self.loaded.as_ref().map(|l| &l.lib).unwrap_or(&self.default_lib);
+            picked = self.edit.add_part_menu(ui, lib);
+            if picked.is_some() {
+                ui.close();
+            }
+        });
+        self.actions.extend(cmds.into_iter().map(Action::Edit));
+        if let Some(ty) = picked {
+            self.actions.push(Action::Place(ty));
+        }
     }
 
     fn banner(&mut self, ui: &mut egui::Ui) {
@@ -697,7 +1171,7 @@ impl ShortCircApp {
                 st.cam.center_on([pt[0] as f64, pt[1] as f64], rect.size());
                 st.flash = Some((pt, now));
             }
-            if resp.dragged_by(PointerButton::Primary) || resp.dragged_by(PointerButton::Middle) {
+            if (!self.edit_mode && resp.dragged_by(PointerButton::Primary)) || resp.dragged_by(PointerButton::Middle) {
                 st.cam.pan(resp.drag_delta());
             }
             if resp.hovered() {
@@ -711,6 +1185,19 @@ impl ShortCircApp {
             }
         }
         let cam = self.vs[vidx].cam;
+        let edit_mode = self.edit_mode;
+        if edit_mode {
+            let evs = self.edit.pointer_events(ui, rect, &resp, cam);
+            let px = 1.0 / cam.scale as f64;
+            let tol = match view {
+                View::Schematic => editor::HitTol { pin: (9.0 * px).max(0.3), wire: 6.0 * px },
+                View::Breadboard => editor::HitTol { pin: breadboard::pin_hit_tolerance(px), wire: breadboard::wire_hit_tolerance(px) },
+            };
+            let ctx = ui.ctx().clone();
+            for ev in evs {
+                self.edit_event(&ctx, ev, tol);
+            }
+        }
 
         // Hover, click and the locked net.
         let mut hl = Highlight::default();
@@ -764,7 +1251,7 @@ impl ShortCircApp {
                     }
                 }
             }
-            if resp.clicked() {
+            if resp.clicked() && !edit_mode {
                 // A click on a pin or wire locks its net; on a part selects it; elsewhere clears.
                 if let Some(h) = pin_hit {
                     st.locked = Some(NetKey::Pin(l.circuit.parts[h.part].id.clone(), h.pin.clone()));
@@ -781,7 +1268,7 @@ impl ShortCircApp {
                 }
             }
         }
-        let selected = st.selected;
+        let selected = if edit_mode { None } else { st.selected };
 
         // Paint.
         let d = DrawCtx { painter: &painter, origin: rect.min, cam, theme, labels: self.labels };
@@ -796,13 +1283,15 @@ impl ShortCircApp {
                 }
             },
             Some(_) => {
-                painter.text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    format!("Nothing placed in the {} view yet", view.key()),
-                    egui::FontId::proportional(16.0),
-                    theme.grid_major,
-                );
+                if !edit_mode {
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("Nothing placed in the {} view yet", view.key()),
+                        egui::FontId::proportional(16.0),
+                        theme.grid_major,
+                    );
+                }
             }
             None => {
                 painter.text(
@@ -812,6 +1301,12 @@ impl ShortCircApp {
                     egui::FontId::proportional(16.0),
                     theme.grid_major,
                 );
+            }
+        }
+        if edit_mode {
+            if let Some(l) = &self.loaded {
+                self.edit.draw_overlays(&d, &l.circuit, &l.lib, view);
+                self.edit.draw_ghost(&d, &mut self.tex, &l.circuit, &l.lib, view);
             }
         }
         if let Some((at, start)) = self.vs[vidx].flash {
@@ -871,10 +1366,15 @@ impl ShortCircApp {
         egui::Panel::bottom("hint").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if let Some((msg, _)) = &self.status {
-                    ui.label(RichText::new(msg.as_str()).strong().color(Color32::from_rgb(90, 190, 120)));
+                    let color = if self.status_warn { Color32::from_rgb(230, 90, 90) } else { Color32::from_rgb(90, 190, 120) };
+                    ui.label(RichText::new(msg.as_str()).strong().color(color));
                     ui.separator();
                 }
-                ui.label(RichText::new(HINT).small());
+                if self.edit_mode {
+                    ui.label(RichText::new(self.edit.editor.hint(self.active)).small());
+                } else {
+                    ui.label(RichText::new(HINT).small());
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(if self.auto_reload { "auto-reload on" } else { "auto-reload off" }).small());
                 });
@@ -915,25 +1415,61 @@ impl eframe::App for ShortCircApp {
         if !self.window_placed {
             self.window_placed = window::place_once(&ctx);
         }
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.dirty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.confirm.is_none() {
+                self.confirm = Some(Then::Close);
+            }
+        }
         self.handle_global_input(&ctx);
+        if self.edit_mode {
+            if self.active != self.edit.last_view {
+                self.edit.last_view = self.active;
+                self.edit_event(&ctx, editor::Event::ViewChanged, Default::default());
+            }
+            if self.confirm.is_none() {
+                for ev in edit_ui::key_events(&ctx) {
+                    self.edit_event(&ctx, ev, Default::default());
+                }
+            }
+        }
         self.poll_reload(&ctx);
         self.run_actions(&ctx);
+        self.update_title(&ctx);
         let theme = Theme::new(self.dark);
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
+        if self.edit_mode {
+            self.edit_tools_panel(ui);
+        }
         self.banner(ui);
         self.status_banner(ui);
+        self.disk_banner(ui);
         self.hint_bar(ui);
         if self.show_issues {
             self.issues_panel(ui, &theme);
         }
-        self.info_panel(ui);
+        if self.edit_mode {
+            self.edit_props_panel(ui);
+        } else {
+            self.info_panel(ui);
+        }
         if self.show_nets {
             self.nets_side_panel(ui);
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.canvas(ui));
         let lib = self.loaded.as_ref().map(|l| &l.lib).unwrap_or(&self.default_lib);
+        self.browser.can_place = self.edit_mode && self.loaded.is_some();
         self.browser.show(&ctx, lib, self.dark, &mut self.tex);
+        if let Some(ty) = self.browser.place_request.take() {
+            self.actions.push(Action::Place(ty));
+        }
+        if self.edit_mode {
+            if let Some(ev) = self.edit.label_prompt(&ctx) {
+                self.edit_event(&ctx, ev, Default::default());
+            }
+        }
+        self.confirm_window(&ctx);
         self.about_window(&ctx);
         self.help_window(&ctx);
         self.run_actions(&ctx);
@@ -993,6 +1529,80 @@ mod tests {
         assert_eq!(l.jumpers.len(), 2);
         assert_eq!(l.report.errors, 0, "{:?}", l.report.issues);
         assert_eq!(core_api::initial_view(&l.circuit), View::Schematic);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn temp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("short-circ-app-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn loading_starts_clean_with_an_empty_history() {
+        let dir = temp("clean");
+        let path = dir.join("t.circ");
+        std::fs::write(&path, SRC).unwrap();
+        let mut l = build_loaded(&path).unwrap();
+        assert!(!l.dirty() && !l.history.can_undo());
+        let lib = Library::load(&l.circuit, None);
+        l.history
+            .apply(&mut l.circuit, &lib, short_circ_core::edit::Edit::SetProp { id: "R1".into(), key: "value".into(), value: Some("1k".into()) })
+            .unwrap();
+        assert!(l.dirty());
+        // Save, then the window title and the poll stamp follow.
+        doc::save_circuit(&path, &l.circuit).unwrap();
+        l.history.mark_clean();
+        assert!(!l.dirty());
+        assert_eq!(doc::window_title(l.path.as_deref(), l.dirty()), "short-circ - t.circ");
+        let again = build_loaded(&path).unwrap();
+        assert_eq!(again.circuit.parts[0].props["value"], "1k");
+        assert!(again.circuit.format == short_circ_core::FORMAT, "a v1 file is saved as v2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn untitled_document_is_clean_empty_current_format_and_saves_as_untitled() {
+        let l = Loaded::untitled();
+        assert!(l.path.is_none() && !l.dirty());
+        assert_eq!(l.circuit.format, short_circ_core::FORMAT);
+        assert!(l.circuit.parts.is_empty() && l.circuit.wires.is_empty());
+        assert_eq!(doc::window_title(None, true), "short-circ - untitled*");
+        assert!(l.report.ok);
+    }
+
+    #[test]
+    fn after_edit_recomputes_everything_for_both_views_and_resolves_new_families() {
+        use short_circ_core::{edit::Edit, Part, Placement};
+        let mut l = Loaded::untitled();
+        let mut p = Part { id: "U1".into(), ty: "dip8".into(), ..Part::default() };
+        p.schematic = Some(Placement::at(0, 0));
+        p.breadboard = Some(Placement::at(0, 0));
+        assert!(l.lib.get("dip8").is_none());
+        l.history.apply(&mut l.circuit, &l.lib, Edit::AddPart(p)).unwrap();
+        l.after_edit();
+        assert!(l.lib.get("dip8").is_some(), "the generated family resolves after the edit");
+        assert!(l.nets(View::Schematic).of_pin("U1", "1").is_some());
+        assert!(l.nets(View::Breadboard).of_pin("U1", "1").is_some());
+        assert!(l.dirty());
+        // An unknown type does not make every edit reload the library.
+        l.circuit.parts[0].ty = "nonesuch".into();
+        l.after_edit();
+        assert_eq!(l.unresolved, vec!["nonesuch".to_string()]);
+        l.after_edit();
+        assert_eq!(l.unresolved, vec!["nonesuch".to_string()]);
+    }
+
+    #[test]
+    fn a_dirty_document_suspends_live_reload() {
+        let dir = temp("dirty-reload");
+        let path = dir.join("t.circ");
+        std::fs::write(&path, SRC).unwrap();
+        let l = build_loaded(&path).unwrap();
+        std::fs::write(&path, SRC.replace("\"100\"", "\"4700\"")).unwrap();
+        let cur = reload::stamp(&path);
+        assert_eq!(reload::decide(l.dirty(), &l.stamp, &cur), reload::Poll::Reload);
+        assert_eq!(reload::decide(true, &l.stamp, &cur), reload::Poll::Conflict);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

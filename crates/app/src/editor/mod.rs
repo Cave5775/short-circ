@@ -36,6 +36,7 @@ pub struct Mods {
     pub alt: bool,
 }
 
+#[cfg(test)]
 impl Mods {
     pub const NONE: Mods = Mods { shift: false, ctrl: false, alt: false };
     pub const SHIFT: Mods = Mods { shift: true, ctrl: false, alt: false };

@@ -7,6 +7,7 @@ mod breadboard;
 mod canvas;
 mod cli;
 mod core_api;
+mod edit_ui;
 mod editor;
 mod labels;
 mod nets_panel;
